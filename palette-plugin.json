@@ -1,0 +1,113 @@
+{
+  "manifest_version": "1",
+  "data_scope": "personal",
+  "id": "palette-video",
+  "name": "VideoStudio",
+  "version": "1.0.0",
+  "developer": "Palette Lab",
+  "category": "Productivity",
+  "tagline": "Describe a video; it picks the right studio app and runs the plan you approve.",
+  "description": "Understands a video request (text, images, video, audio), works out the skills it needs, picks the right video app or chain of apps, validates the plan and runs it after your approval. Real editing (joining clips, crossfades, music) runs through OpenMontage when it is installed.",
+  "icon": "Clapperboard",
+  "gradient": {
+    "bg": "linear-gradient(135deg, #1F5FBF, #24665A)",
+    "text": "#fff"
+  },
+  "sdk": {
+    "frontend": "^0.1.38",
+    "backend": "^0.1.8"
+  },
+  "platform": {
+    "min_version": "0.1.0"
+  },
+  "capabilities": {
+    "frontend": true,
+    "backend": true,
+    "database": true,
+    "webhooks": false,
+    "scheduled_jobs": false,
+    "file_uploads": true,
+    "external_network": [
+      "llm.pltt.dev",
+      "queue.fal.run",
+      "fal.run",
+      "rest.alpha.fal.ai",
+      "fal.media",
+      "v3.fal.media",
+      "v3b.fal.media",
+      "storage.googleapis.com",
+      "en.wikipedia.org",
+      "huggingface.co"
+    ],
+    "background_jobs": true
+  },
+  "public_routes": [],
+  "scheduled_jobs": [],
+  "rate_limit": {
+    "per_minute": 240
+  },
+  "frontend": {
+    "entry": "./frontend/src/index.tsx",
+    "sandbox": true
+  },
+  "backend": {
+    "entry": "./backend/api/main.py"
+  },
+  "agents": [],
+  "tools": [],
+  "connections": [],
+  "permissions": [
+    "resources:read",
+    "resources:write"
+  ],
+  "database": {
+    "schema": "app_palette_video",
+    "migrations": "./backend/migrations"
+  },
+  "platform_services": [
+    "llm",
+    "storage"
+  ],
+  "secrets": {
+    "PALETTE_API_KEY": {
+      "scope": "plugin",
+      "required": false,
+      "help": "Palette LLM gateway key. Without it the app uses the platform's own models (ctx.llm)."
+    },
+    "PALETTE_LLM_BASE_URL": {
+      "scope": "plugin",
+      "required": false,
+      "help": "Gateway base URL (default https://llm.pltt.dev)."
+    },
+    "PALETTE_LLM_MODEL": {
+      "scope": "plugin",
+      "required": false,
+      "help": "Models for planning and deep analysis, in order, comma-separated, exactly as /v1/models lists them (e.g. anthropic/claude-opus-5.5,anthropic/claude-sonnet-5.5). The first available one answers; palette-llm-max is always the last resort."
+    },
+    "OPENMONTAGE_DIR": {
+      "scope": "dev",
+      "required": false,
+      "help": "Local OpenMontage checkout for real editing (AGPL-3.0, run unmodified as a separate process)."
+    },
+    "FAL_KEY": {
+      "scope": "plugin",
+      "required": true,
+      "help": "fal.ai key the Flow Video and Storyboard & Video engines use for images and clips."
+    },
+    "PALETTE_VIDEO_QUALITY": {
+      "scope": "plugin",
+      "required": false,
+      "help": "test (cheap, default) or full."
+    },
+    "OPENMONTAGE_GUIDES_DIR": {
+      "scope": "dev",
+      "required": false,
+      "help": "Local OpenMontage checkout whose genre guides the scene planner reads (read-only)."
+    },
+    "RESEARCH_CONTACT": {
+      "scope": "plugin",
+      "required": false,
+      "help": "A URL or email put in the User-Agent of Wikipedia research requests (Wikimedia's robot policy asks for contact details). Optional."
+    }
+  }
+}

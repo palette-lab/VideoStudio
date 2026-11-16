@@ -1,0 +1,113 @@
+{
+  "app_id": "palette-motion-studio",
+  "name": "Motion Studio",
+  "description": "Programmatic motion written by the Palette LLM as a HyperFrames composition (HTML + GSAP) and rendered to MP4: kinetic text, titles and end cards, animated charts and diagrams, product showcases and turntables from a product image, stylised exploded/assembly views, and graphics placed on top of footage from another step.",
+  "status": "available",
+  "verified": false,
+  "execution": {
+    "adapter": "engine",
+    "service_target": "engines/motion_engine.py (HyperFrames 0.9.7, Apache-2.0, in tools/hyperframes)"
+  },
+  "source": {
+    "repo": "heygen-com/hyperframes",
+    "license": "Apache-2.0",
+    "version": "0.9.7",
+    "runtime": "tools/hyperframes"
+  },
+  "capabilities": [
+    "motion.kinetic_typography",
+    "motion.data_visualization",
+    "motion.overlay_graphics",
+    "motion.product_animation",
+    "motion.exploded_view"
+  ],
+  "capability_status": {
+    "motion.kinetic_typography": "confirmed",
+    "motion.data_visualization": "confirmed",
+    "motion.overlay_graphics": "confirmed",
+    "motion.product_animation": "unverified",
+    "motion.exploded_view": "unverified",
+    "video.text_to_video": "unknown",
+    "story.character_consistency": "unknown",
+    "edit.assemble_clips": "unknown"
+  },
+  "input_modalities": [
+    "text",
+    "image",
+    "video"
+  ],
+  "input_modalities_status": "confirmed",
+  "capability_requirements": {
+    "motion.overlay_graphics": [
+      {
+        "modality": "video",
+        "reason": "needs the footage to place graphics on"
+      }
+    ]
+  },
+  "accepts_handoff": [
+    "video_file",
+    "image_file"
+  ],
+  "emits": [
+    "video_file"
+  ],
+  "best_for": [
+    "kinetic text, titles, slogans and end cards",
+    "animated charts, infographics and diagrams",
+    "product showcase or turntable from a product photo",
+    "spec callouts and graphics on top of AI footage",
+    "stylised exploded or assembly diagrams"
+  ],
+  "not_good_for": [
+    "photoreal people, places or live action (use Flow Video or Storyboard & Video)",
+    "true 3D-accurate exploded views of a real product (it draws a stylised diagram)",
+    "realistic products, vehicles, machines, people or places (it draws them with code shapes): use an AI footage app (Flow Video / Storyboard) and add graphics on top"
+  ],
+  "fallback_apps": [],
+  "profile": {
+    "shot_structures": {
+      "value": [
+        "single_continuous",
+        "multi_scene"
+      ],
+      "status": "confirmed"
+    },
+    "max_duration_s": {
+      "value": 60,
+      "status": "unverified"
+    },
+    "aspect_ratios": {
+      "value": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:3",
+        "3:4",
+        "21:9"
+      ],
+      "status": "confirmed"
+    },
+    "motion_styles": {
+      "value": [
+        "programmatic_precise"
+      ],
+      "status": "confirmed"
+    },
+    "accepts_asset_roles": {
+      "value": [
+        "product",
+        "logo",
+        "background",
+        "style_reference",
+        "footage_to_edit"
+      ],
+      "status": "confirmed"
+    },
+    "audio_output": {
+      "value": [],
+      "status": "confirmed"
+    }
+  },
+  "profile_notes": "Added 2026-11-13. HyperFrames 0.9.7 renders locally with headless Chrome + ffmpeg, always at full size (short side 1080 px: smaller frames drop text and misplace bottom-anchored layers in this renderer). Charts with data use a tested bar-chart template (the LLM only extracts the numbers; a 10 s 1920x1080 chart renders in ~21 s); other motion is LLM-written, gated by `hyperframes check` and a vision review of rendered frames. Overlay on AI footage confirmed 2026-11-13 (Flow Video clip + animated slogan, 9:16). Exploded views are stylised diagrams, not 3D-accurate. No audio of its own."
+}

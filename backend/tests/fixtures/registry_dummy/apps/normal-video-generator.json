@@ -1,0 +1,121 @@
+{
+  "app_id": "normal-video-generator",
+  "name": "Normal Video Generator",
+  "description": "Generates a single short AI video clip from a text prompt or animates one image.",
+  "status": "available",
+  "verified": false,
+  "execution": {
+    "adapter": "mock",
+    "service_target": null
+  },
+  "capabilities": [
+    "video.text_to_video",
+    "video.image_to_video"
+  ],
+  "input_modalities": [
+    "text",
+    "image"
+  ],
+  "capability_requirements": {
+    "video.image_to_video": [
+      {
+        "modality": "image",
+        "reason": "needs the image to animate"
+      }
+    ]
+  },
+  "accepts_handoff": [
+    "image_file"
+  ],
+  "emits": [
+    "video_file"
+  ],
+  "best_for": [
+    "one quick clip",
+    "animating a single photo",
+    "simple product or scene shot"
+  ],
+  "not_good_for": [
+    "multi-scene stories",
+    "editing existing footage",
+    "garment-accurate fashion",
+    "precise diagrams"
+  ],
+  "fallback_apps": [
+    "storyboard-studio"
+  ],
+  "capability_status": {
+    "video.text_to_video": "unverified",
+    "video.image_to_video": "unverified"
+  },
+  "input_modalities_status": "unverified",
+  "profile": {
+    "shot_structures": {
+      "value": [
+        "single_continuous"
+      ],
+      "status": "unverified"
+    },
+    "max_duration_s": {
+      "value": 10,
+      "status": "unverified"
+    },
+    "aspect_ratios": {
+      "value": null,
+      "status": "unknown"
+    },
+    "motion_styles": {
+      "value": [
+        "realistic"
+      ],
+      "status": "unverified"
+    },
+    "accepts_asset_roles": {
+      "value": [
+        "product",
+        "character",
+        "background",
+        "style_reference",
+        "logo"
+      ],
+      "status": "unverified"
+    },
+    "audio_output": {
+      "value": null,
+      "status": "unknown"
+    }
+  },
+  "profile_notes": "Initial profile: assumptions until the application owner confirms them.",
+  "implementation_candidates": [
+    {
+      "repo": "OpenMontage",
+      "license": "AGPL-3.0",
+      "path": "repos/OpenMontage",
+      "entry": "tools/video/video_selector.py",
+      "covers": [
+        "video.text_to_video",
+        "video.image_to_video"
+      ],
+      "limits": "Routes to paid providers (Kling, Veo, Seedance, Runway, ...); needs FAL_KEY or a provider key.",
+      "needs": [
+        "python3.10",
+        "ffmpeg",
+        "provider API key"
+      ]
+    },
+    {
+      "repo": "OpenMotion",
+      "license": "Apache-2.0",
+      "path": "repos/openmotion",
+      "entry": "gateway/providers.ts (Atlas Seedance 2.0, fal Wan 2.2)",
+      "covers": [
+        "video.text_to_video"
+      ],
+      "limits": "Generation gateway only; ATLASCLOUD_API_KEY or FAL_KEY.",
+      "needs": [
+        "node22",
+        "provider API key"
+      ]
+    }
+  ]
+}

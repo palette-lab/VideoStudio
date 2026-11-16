@@ -1,0 +1,91 @@
+{
+  "app_id": "palette-presenter-studio",
+  "name": "Presenter Studio",
+  "description": "Talking-to-camera videos with lip-synced speech: YouTube explainers, UGC ads, testimonials and spokesperson videos. Writes the script, uses the user's photo of the presenter or casts a fictional one with Nano Banana Pro, speaks the script (or uses the user's own recording) and lip-syncs the presenter to it. Voice (Kokoro) and lip-sync (Ditto) run free on the local machine.",
+  "status": "available",
+  "verified": false,
+  "execution": {
+    "adapter": "engine",
+    "service_target": "engines/presenter_engine.py (local Ditto + Kokoro; fal models only with PRESENTER_PAID=on)"
+  },
+  "source": {
+    "repo": "antgroup/ditto-talkinghead, hexgrad/Kokoro-82M (kokoro-onnx)",
+    "license": "Apache-2.0 (Ditto's InsightFace face detector: non-commercial research)"
+  },
+  "capabilities": [
+    "presenter.talking_head"
+  ],
+  "capability_status": {
+    "presenter.talking_head": "confirmed",
+    "edit.captions_subtitles": "unknown",
+    "edit.audio_mix": "unknown"
+  },
+  "input_modalities": [
+    "image",
+    "audio"
+  ],
+  "input_modalities_status": "confirmed",
+  "capability_requirements": {},
+  "accepts_handoff": [],
+  "emits": [
+    "video_file"
+  ],
+  "best_for": [
+    "YouTube-style explainer videos with a person talking to camera",
+    "UGC ads: a creator holding the product and talking to a phone camera",
+    "testimonials and spokesperson videos",
+    "lip-syncing a photo of a person to the user's own voice recording"
+  ],
+  "not_good_for": [
+    "films with several locations or scenes (one presenter, one framing; long speech is joined with jump cuts)",
+    "lip-syncing an existing video of a person",
+    "several people talking to each other"
+  ],
+  "fallback_apps": [],
+  "profile": {
+    "shot_structures": {
+      "value": [
+        "single_continuous",
+        "multi_scene"
+      ],
+      "status": "confirmed"
+    },
+    "max_duration_s": {
+      "value": 180,
+      "status": "confirmed"
+    },
+    "aspect_ratios": {
+      "value": [
+        "9:16",
+        "16:9",
+        "1:1",
+        "4:5"
+      ],
+      "status": "confirmed"
+    },
+    "motion_styles": {
+      "value": [
+        "realistic"
+      ],
+      "status": "confirmed"
+    },
+    "accepts_asset_roles": {
+      "value": [
+        "character",
+        "product",
+        "logo",
+        "audio_track",
+        "background",
+        "style_reference"
+      ],
+      "status": "confirmed"
+    },
+    "audio_output": {
+      "value": [
+        "voiceover"
+      ],
+      "status": "confirmed"
+    }
+  },
+  "profile_notes": "Added 2026-11-13. Free by default: voice Kokoro (Apache-2.0, local CPU; English, Hindi, Spanish, French, Italian, Japanese, Portuguese, Chinese) and lip-sync Ditto (Apache-2.0, local Apple GPU or CPU), installed with tools/local_lipsync/setup.sh. Presenter photo: the user's, else Nano Banana Pro on fal (paid, cents). PRESENTER_PAID=on adds ElevenLabs and fal lip-sync (Kling AI Avatar v2, LongCat, InfiniteTalk) as fallbacks. Speech is cut at pauses into parts of at most 27 s and joined with jump cuts. Test quality: up to 15 s; full: up to 180 s. No captions yet."
+}

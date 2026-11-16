@@ -1,0 +1,103 @@
+{
+  "app_id": "palette-effects-studio",
+  "name": "Effects Studio",
+  "description": "Adds creator-style finishing effects to a finished or filmed video: words behind the speaker, spotlight, checklists, glass graphs, headline boxes, stamps, punch-ins and grades. The AI watches the video (face on screen, what is said and when) and picks and times the effects.",
+  "status": "available",
+  "verified": false,
+  "execution": {
+    "adapter": "engine",
+    "service_target": "engines/effects_engine.py (claude-video-effects fx.py, MIT, tools/vendor-src)"
+  },
+  "source": {
+    "repo": "Vibha-Ramprakash/claude-video-effects",
+    "license": "MIT (YuNet MIT, MediaPipe Apache-2.0, fonts OFL/Apache)",
+    "runtime": "tools/vendor-src/claude-video-effects/.venv"
+  },
+  "capabilities": [
+    "edit.explainer_effects",
+    "edit.color_grade"
+  ],
+  "capability_status": {
+    "edit.explainer_effects": "confirmed",
+    "edit.color_grade": "confirmed",
+    "motion.overlay_graphics": "unknown",
+    "edit.captions_subtitles": "unknown"
+  },
+  "input_modalities": [
+    "video"
+  ],
+  "input_modalities_status": "confirmed",
+  "capability_requirements": {
+    "edit.explainer_effects": [
+      {
+        "modality": "video",
+        "reason": "needs the video to add effects to"
+      }
+    ],
+    "edit.color_grade": [
+      {
+        "modality": "video",
+        "reason": "needs the video to grade"
+      }
+    ]
+  },
+  "accepts_handoff": [
+    "video_file"
+  ],
+  "emits": [
+    "video_file"
+  ],
+  "best_for": [
+    "explanation and educational videos",
+    "talking-head videos (effects track the face and sit behind the person)",
+    "engaging text pops, checklists and graphs timed to speech"
+  ],
+  "not_good_for": [
+    "making footage from scratch",
+    "captions/subtitles (not added)",
+    "sound effects (not added)"
+  ],
+  "fallback_apps": [],
+  "profile": {
+    "shot_structures": {
+      "value": [
+        "single_continuous",
+        "multi_scene"
+      ],
+      "status": "confirmed"
+    },
+    "max_duration_s": {
+      "value": 600,
+      "status": "unverified"
+    },
+    "aspect_ratios": {
+      "value": [
+        "9:16",
+        "16:9",
+        "1:1",
+        "4:5"
+      ],
+      "status": "confirmed"
+    },
+    "motion_styles": {
+      "value": [
+        "realistic",
+        "programmatic_precise"
+      ],
+      "status": "confirmed"
+    },
+    "accepts_asset_roles": {
+      "value": [
+        "footage_to_edit"
+      ],
+      "status": "confirmed"
+    },
+    "audio_output": {
+      "value": [
+        "keeps_original"
+      ],
+      "status": "confirmed"
+    }
+  },
+  "profile_notes": "Added 2026-11-13. 24 of the tool's 51 effects are offered (the ones that take their text from the plan and need no folder of the user's posts). Face-tracked effects only when a face is detected. Keeps the original audio; adds no captions or sounds. Renders at 1080p locally."
+}

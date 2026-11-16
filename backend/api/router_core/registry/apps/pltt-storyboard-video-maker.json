@@ -1,0 +1,153 @@
+{
+  "app_id": "pltt-storyboard-video-maker",
+  "name": "Storyboard & Video",
+  "description": "Plans an idea (plus optional character/object/background/style references) into a 20-60 s multi-scene storyboard with a locked style bible, makes one consistent keyframe per scene, animates each with Kling/Seedance (keyframe bridging or in-clip multi-shot) and joins the clips with ffmpeg, with native audio or ElevenLabs music/voice-over and burned captions; publishes to YouTube, Instagram or TikTok.",
+  "status": "available",
+  "verified": false,
+  "execution": {
+    "adapter": "engine",
+    "service_target": "engines/story_engine.py (storyboard-video planner + models, run inside Palette-Video)"
+  },
+  "source": {
+    "repo": "palette-lab/pltt-os-apps-rinsan",
+    "path": "storyboard-video",
+    "plugin_id": "pltt-storyboard-video-maker",
+    "version": "0.0.0757"
+  },
+  "invocation": {
+    "broker": null,
+    "base": "/api/v1/plugins/pltt-storyboard-video-maker",
+    "chain": [
+      "POST /story/plan",
+      "POST /generate/image (per scene)",
+      "POST /story/video-prompts",
+      "POST /generate/video (per scene)",
+      "POST /story/merge"
+    ],
+    "note": "No broker service; async steps with SSE /events/{project_id}. The chain is driven by the app's own browser UI (engine.ts)."
+  },
+  "capabilities": [
+    "story.multi_scene_storyboard",
+    "story.character_consistency",
+    "video.from_storyboard",
+    "video.image_to_video",
+    "video.text_to_video",
+    "edit.assemble_clips",
+    "edit.audio_mix",
+    "edit.captions_subtitles",
+    "edit.reformat_aspect",
+    "motion.product_animation",
+    "motion.exploded_view",
+    "motion.kinetic_typography",
+    "edit.explainer_effects"
+  ],
+  "capability_status": {
+    "story.multi_scene_storyboard": "confirmed",
+    "story.character_consistency": "confirmed",
+    "video.from_storyboard": "confirmed",
+    "video.image_to_video": "confirmed",
+    "video.text_to_video": "unverified",
+    "edit.assemble_clips": "confirmed",
+    "edit.audio_mix": "confirmed",
+    "edit.captions_subtitles": "unverified",
+    "edit.reformat_aspect": "unverified",
+    "story.reference_shot_breakdown": "unknown",
+    "edit.transitions": "unknown",
+    "motion.kinetic_typography": "unverified",
+    "fashion.garment_film": "unknown",
+    "motion.product_animation": "unverified",
+    "motion.exploded_view": "unverified",
+    "edit.explainer_effects": "unverified"
+  },
+  "extra_capabilities": [
+    "locked style bible across scenes",
+    "brand-kit asset classification",
+    "keyframe bridging between scenes",
+    "2-4 shots inside one clip",
+    "ElevenLabs narration + music with ducking and burned captions",
+    "publish to YouTube / Instagram / TikTok"
+  ],
+  "input_modalities": [
+    "text",
+    "image",
+    "video"
+  ],
+  "input_modalities_status": "confirmed",
+  "capability_requirements": {
+    "video.image_to_video": [
+      {
+        "modality": "image",
+        "reason": "needs the image to animate"
+      }
+    ]
+  },
+  "accepts_handoff": [],
+  "emits": [
+    "storyboard_json",
+    "image_file",
+    "video_file"
+  ],
+  "best_for": [
+    "20-60 s multi-scene story or ad videos from an idea",
+    "recurring characters/products/locations kept consistent from references",
+    "narrated shorts with voice-over, music and captions",
+    "9:16 shorts ready for YouTube, Instagram or TikTok",
+    "AI-filmed product animation and exploded views (parts separating in mid-air, real footage, not a diagram)",
+    "realistic explainers and ads with AI footage plus labels, arrows, measurements and creator/explainer effects added on top by the engine"
+  ],
+  "not_good_for": [
+    "code-driven data animation",
+    "editing existing footage",
+    "garment-faithful fashion films",
+    "videos under 20 s or over 60 s",
+    "pure data charts without footage"
+  ],
+  "fallback_apps": [
+    "pltt-flow-video-2"
+  ],
+  "profile": {
+    "shot_structures": {
+      "value": [
+        "multi_scene"
+      ],
+      "status": "confirmed"
+    },
+    "max_duration_s": {
+      "value": 60,
+      "status": "confirmed"
+    },
+    "aspect_ratios": {
+      "value": [
+        "16:9",
+        "9:16",
+        "1:1"
+      ],
+      "status": "confirmed"
+    },
+    "motion_styles": {
+      "value": [
+        "realistic"
+      ],
+      "status": "confirmed"
+    },
+    "accepts_asset_roles": {
+      "value": [
+        "character",
+        "product",
+        "background",
+        "style_reference"
+      ],
+      "status": "confirmed"
+    },
+    "audio_output": {
+      "value": [
+        "native_clip_audio",
+        "music",
+        "voiceover",
+        "captions"
+      ],
+      "status": "confirmed"
+    }
+  },
+  "profile_notes": "From source v0.0.0757 (read 2026-11-13). Planned total 20-60 s (2-20 scenes, 3-10 s each). Joins clips with hard cuts. Never renders logos or readable text. Runs as an engine inside Palette-Video (the app's own planner prompt and models, vendored); its own screens are not used. Exploded views and product animation added 2026-11-13 as AI footage (unverified). 2026-11-13: the engine adds graphics (Motion Studio overlay) and effects (Effects Studio) itself when they help."
+}

@@ -69,3 +69,4 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+tools/vendor-src/claude-video-effects/

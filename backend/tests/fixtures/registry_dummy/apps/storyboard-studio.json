@@ -1,0 +1,125 @@
+{
+  "app_id": "storyboard-studio",
+  "name": "Storyboard Studio",
+  "description": "Turns a text idea or reference images into a multi-scene storyboard and produces the video from it (text-to-video and image-to-video only).",
+  "status": "available",
+  "verified": false,
+  "execution": {
+    "adapter": "mock",
+    "service_target": null
+  },
+  "capabilities": [
+    "story.multi_scene_storyboard",
+    "story.character_consistency",
+    "video.from_storyboard",
+    "video.text_to_video",
+    "video.image_to_video"
+  ],
+  "input_modalities": [
+    "text",
+    "image"
+  ],
+  "capability_requirements": {
+    "video.image_to_video": [
+      {
+        "modality": "image",
+        "reason": "needs the image(s) to build the video from"
+      }
+    ]
+  },
+  "accepts_handoff": [],
+  "emits": [
+    "storyboard_json",
+    "video_file"
+  ],
+  "best_for": [
+    "multi-scene video from a text idea (text-to-video)",
+    "multi-scene video from images (image-to-video)",
+    "recurring characters"
+  ],
+  "not_good_for": [
+    "video uploads of any kind (not supported)",
+    "recreating a reference video (not supported yet)",
+    "editing or enhancing existing footage",
+    "precise code-driven product diagrams"
+  ],
+  "fallback_apps": [
+    "normal-video-generator"
+  ],
+  "profile_notes": "Inputs confirmed by the owner on 2026-11-12: text and image only; no video input, no reference-video feature yet.",
+  "capability_status": {
+    "story.multi_scene_storyboard": "unverified",
+    "story.character_consistency": "unverified",
+    "video.from_storyboard": "unverified",
+    "video.text_to_video": "confirmed",
+    "video.image_to_video": "confirmed",
+    "story.reference_shot_breakdown": "unknown"
+  },
+  "input_modalities_status": "confirmed",
+  "profile": {
+    "shot_structures": {
+      "value": [
+        "multi_scene"
+      ],
+      "status": "unverified"
+    },
+    "max_duration_s": {
+      "value": 180,
+      "status": "unverified"
+    },
+    "aspect_ratios": {
+      "value": null,
+      "status": "unknown"
+    },
+    "motion_styles": {
+      "value": [
+        "realistic"
+      ],
+      "status": "unverified"
+    },
+    "accepts_asset_roles": {
+      "value": [
+        "product",
+        "character",
+        "background",
+        "style_reference",
+        "logo"
+      ],
+      "status": "unverified"
+    },
+    "audio_output": {
+      "value": null,
+      "status": "unknown"
+    }
+  },
+  "implementation_candidates": [
+    {
+      "repo": "Hybrid Director (local)",
+      "license": "own code",
+      "path": "~/Desktop/video studio/hybrid",
+      "entry": "app/director.py + app/scenes.py",
+      "covers": [
+        "story.multi_scene_storyboard",
+        "video.from_storyboard",
+        "story.character_consistency"
+      ],
+      "limits": "Your own app on this machine; not yet exposed as a callable service.",
+      "needs": [
+        "python3.12",
+        "ffmpeg",
+        "provider keys"
+      ]
+    },
+    {
+      "repo": "OpenMontage",
+      "license": "AGPL-3.0",
+      "path": "repos/OpenMontage",
+      "entry": "schemas/artifacts/scene_plan + skills/pipelines/cinematic",
+      "covers": [],
+      "limits": "Building blocks only: an LLM agent must write the scene plan; no turnkey engine.",
+      "needs": [
+        "LLM agent loop"
+      ]
+    }
+  ]
+}

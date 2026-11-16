@@ -1,0 +1,6 @@
+{
+  "name": "palette-video-motion-runtime",
+  "private": true,
+  "description": "Pinned HyperFrames (Apache-2.0, HeyGen) runtime the Motion Studio engine renders with.",
+  "dependencies": { "hyperframes": "0.9.7", "gsap": "3.13.0" }
+}

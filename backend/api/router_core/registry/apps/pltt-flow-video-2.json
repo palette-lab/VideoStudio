@@ -1,0 +1,189 @@
+{
+  "app_id": "pltt-flow-video-2",
+  "name": "Flow Video",
+  "description": "Plans a brief (plus optional reference images) into a multi-scene storyboard with a continuity sheet, makes consistent scene stills and Kling/Seedance clips (text-to-video, image-to-video, first/last frame, multi-reference, continuous one-take), adds voice-over and music, edits on a timeline (trim, captions, fades, audio mix, camera moves) and exports an MP4.",
+  "status": "available",
+  "verified": false,
+  "execution": {
+    "adapter": "engine",
+    "service_target": "engines/story_engine.py (flow_video planner + models, run inside Palette-Video)"
+  },
+  "source": {
+    "repo": "palette-lab/pltt-os-apps-rinsan",
+    "path": "flow_video",
+    "plugin_id": "pltt-flow-video-2",
+    "version": "0.0.35"
+  },
+  "invocation": {
+    "broker": null,
+    "base": "/api/v1/plugins/pltt-flow-video-2",
+    "chain": [
+      "POST /story/plan",
+      "POST /generate/image (per scene)",
+      "POST /generate/video (per scene)",
+      "PUT /projects/{id}",
+      "POST /projects/{id}/export"
+    ],
+    "note": "No broker service; every step is async (poll GET /generations/{id} or SSE). The end-to-end chain is driven by the app's own browser UI."
+  },
+  "capabilities": [
+    "story.multi_scene_storyboard",
+    "story.character_consistency",
+    "video.from_storyboard",
+    "video.text_to_video",
+    "video.image_to_video",
+    "edit.trim_and_cut",
+    "edit.captions_subtitles",
+    "edit.audio_mix",
+    "edit.assemble_clips",
+    "edit.transitions",
+    "edit.reformat_aspect",
+    "fashion.garment_film",
+    "fashion.model_garment_fit",
+    "motion.product_animation",
+    "motion.exploded_view",
+    "motion.kinetic_typography",
+    "edit.explainer_effects"
+  ],
+  "capability_status": {
+    "story.multi_scene_storyboard": "confirmed",
+    "story.character_consistency": "confirmed",
+    "video.from_storyboard": "confirmed",
+    "video.text_to_video": "confirmed",
+    "video.image_to_video": "confirmed",
+    "edit.trim_and_cut": "unknown",
+    "edit.captions_subtitles": "confirmed",
+    "edit.audio_mix": "confirmed",
+    "edit.assemble_clips": "confirmed",
+    "edit.transitions": "unknown",
+    "edit.reformat_aspect": "unverified",
+    "fashion.garment_film": "unverified",
+    "fashion.model_garment_fit": "unverified",
+    "story.reference_shot_breakdown": "unknown",
+    "motion.product_animation": "unverified",
+    "motion.exploded_view": "unverified",
+    "motion.kinetic_typography": "unverified",
+    "motion.data_visualization": "unknown",
+    "motion.overlay_graphics": "unknown",
+    "edit.enhance_quality": "unknown",
+    "edit.color_grade": "unknown",
+    "edit.explainer_effects": "unverified"
+  },
+  "extra_capabilities": [
+    "first/last-frame control",
+    "multi-reference-to-video (Seedance, Kling Elements)",
+    "continuous one-take Flow mode",
+    "camera-path moves on a still",
+    "scene stills / image edit",
+    "ElevenLabs voice-over (en/ko/ja) with timed captions",
+    "instrumental music generation (5-300 s)",
+    "chat-driven project edits"
+  ],
+  "input_modalities": [
+    "text",
+    "image",
+    "video",
+    "audio"
+  ],
+  "input_modalities_status": "confirmed",
+  "capability_requirements": {
+    "video.image_to_video": [
+      {
+        "modality": "image",
+        "reason": "needs a start frame image to animate"
+      }
+    ],
+    "edit.trim_and_cut": [
+      {
+        "modality": "video",
+        "reason": "trims clips placed on its timeline"
+      }
+    ],
+    "fashion.model_garment_fit": [
+      {
+        "modality": "image",
+        "tag": "garment",
+        "reason": "needs photos of the garments"
+      }
+    ]
+  },
+  "accepts_handoff": [
+    "image_file",
+    "video_file",
+    "audio_file"
+  ],
+  "emits": [
+    "storyboard_json",
+    "image_file",
+    "video_file",
+    "audio_file"
+  ],
+  "best_for": [
+    "multi-scene AI films from a brief (ads, stories, explainers, travel, food, fashion, music videos), 3-120 s",
+    "consistent characters, products, garments and locations from reference images",
+    "single AI clips with first/last frame control",
+    "voice-over, music and burned-in captions, exported to MP4",
+    "AI-filmed product animation and exploded views (parts separating in mid-air, real footage, not a diagram)",
+    "realistic explainers and ads with AI footage plus labels, arrows, measurements and creator/explainer effects added on top by the engine"
+  ],
+  "not_good_for": [
+    "recreating a reference video (only its first frame is read)",
+    "upscaling, denoising or colour-grading existing footage",
+    "films longer than 120 s",
+    "pure data charts without footage"
+  ],
+  "fallback_apps": [
+    "pltt-storyboard-video-maker"
+  ],
+  "profile": {
+    "shot_structures": {
+      "value": [
+        "single_continuous",
+        "multi_scene"
+      ],
+      "status": "confirmed"
+    },
+    "max_duration_s": {
+      "value": 120,
+      "status": "confirmed"
+    },
+    "aspect_ratios": {
+      "value": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "21:9",
+        "4:3",
+        "3:4"
+      ],
+      "status": "confirmed"
+    },
+    "motion_styles": {
+      "value": [
+        "realistic"
+      ],
+      "status": "confirmed"
+    },
+    "accepts_asset_roles": {
+      "value": [
+        "character",
+        "product",
+        "garment",
+        "background",
+        "style_reference",
+        "footage_to_edit",
+        "audio_track"
+      ],
+      "status": "confirmed"
+    },
+    "audio_output": {
+      "value": [
+        "native_clip_audio",
+        "voiceover",
+        "music"
+      ],
+      "status": "confirmed"
+    }
+  },
+  "profile_notes": "From source v0.0.35 (read 2026-11-13). Clip models Kling 3.0/O3/4.0 (<=30 s), Seedance 2.0/2.5; film 3-120 s. Transitions: cut or fade only. Music instrumental only. Runs as an engine inside Palette-Video (the app's own planner prompt and models, vendored); its own screens are not used. Exploded views and product animation added 2026-11-13 as AI footage (unverified). 2026-11-13: the engine adds graphics (Motion Studio overlay) and effects (Effects Studio) itself when they help. Inside VideoStudio the engine does not trim footage or add transitions (hard cuts only): those are 'unknown' so the router never promises them."
+}

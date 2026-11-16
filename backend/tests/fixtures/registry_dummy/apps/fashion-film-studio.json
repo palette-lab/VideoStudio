@@ -1,0 +1,106 @@
+{
+  "app_id": "fashion-film-studio",
+  "name": "Fashion Film Studio",
+  "description": "Produces fashion campaign films that keep specific garments faithful, worn by consistent models.",
+  "status": "available",
+  "verified": false,
+  "execution": {
+    "adapter": "mock",
+    "service_target": null
+  },
+  "capabilities": [
+    "fashion.garment_film",
+    "fashion.model_garment_fit",
+    "story.character_consistency"
+  ],
+  "input_modalities": [
+    "text",
+    "image"
+  ],
+  "capability_requirements": {
+    "fashion.garment_film": [
+      {
+        "modality": "image",
+        "tag": "garment",
+        "reason": "needs photos of the garments to keep them accurate"
+      }
+    ],
+    "fashion.model_garment_fit": [
+      {
+        "modality": "image",
+        "tag": "garment",
+        "reason": "needs photos of the garments to fit on the model"
+      }
+    ]
+  },
+  "accepts_handoff": [
+    "storyboard_json"
+  ],
+  "emits": [
+    "video_file"
+  ],
+  "best_for": [
+    "garment campaigns",
+    "lookbooks",
+    "model wearing specific clothes"
+  ],
+  "not_good_for": [
+    "non-fashion products",
+    "editing existing footage"
+  ],
+  "fallback_apps": [],
+  "capability_status": {
+    "fashion.garment_film": "unverified",
+    "fashion.model_garment_fit": "unverified",
+    "story.character_consistency": "unverified"
+  },
+  "input_modalities_status": "unverified",
+  "profile": {
+    "shot_structures": {
+      "value": null,
+      "status": "unknown"
+    },
+    "max_duration_s": {
+      "value": 90,
+      "status": "unverified"
+    },
+    "aspect_ratios": {
+      "value": null,
+      "status": "unknown"
+    },
+    "motion_styles": {
+      "value": [
+        "realistic"
+      ],
+      "status": "unverified"
+    },
+    "accepts_asset_roles": {
+      "value": [
+        "garment",
+        "character",
+        "background",
+        "style_reference",
+        "logo"
+      ],
+      "status": "unverified"
+    },
+    "audio_output": {
+      "value": null,
+      "status": "unknown"
+    }
+  },
+  "profile_notes": "Initial profile: assumptions until the application owner confirms them.",
+  "implementation_candidates": [
+    {
+      "repo": "OpenMontage",
+      "license": "AGPL-3.0",
+      "path": "repos/OpenMontage",
+      "entry": "reference_to_video providers + enhancement/color_grade.py",
+      "covers": [],
+      "limits": "No fashion pipeline or garment-fidelity tooling in any studied repo.",
+      "needs": [
+        "provider API key"
+      ]
+    }
+  ]
+}

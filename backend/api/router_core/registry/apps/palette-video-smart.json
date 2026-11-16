@@ -1,0 +1,146 @@
+{
+  "app_id": "palette-video-smart",
+  "name": "Palette Video Smart",
+  "description": "Turns documents (PDF, PPTX, DOCX, HWP/HWPX, CSV, text), images, clips or a brief into a narrated, code-animated multi-scene motion video: charts, diagrams, tables, kinetic and 3D type, product cut-outs and turntables, with Korean-first narration, captions, music and an optional AI presenter; rendered to MP4.",
+  "status": "disabled",
+  "verified": false,
+  "execution": {
+    "adapter": "mock",
+    "service_target": null
+  },
+  "source": {
+    "repo": "palette-lab/pltt-os-apps-rinsan",
+    "path": "palette_video_smart",
+    "plugin_id": "palette-video-smart",
+    "version": "0.0.59"
+  },
+  "invocation": {
+    "broker": null,
+    "base": "/api/v1/plugins/palette-video-smart",
+    "chain": [
+      "POST /uploads (per file)",
+      "POST /projects",
+      "GET /projects/{id}/status",
+      "POST /projects/{id}/render"
+    ],
+    "note": "No broker service; user-scoped HTTP routes (contract in docs/CONTRACTS.md). Results in Project.outputs[]."
+  },
+  "capabilities": [
+    "story.multi_scene_storyboard",
+    "video.from_storyboard",
+    "motion.data_visualization",
+    "motion.kinetic_typography",
+    "motion.product_animation",
+    "edit.audio_mix",
+    "edit.captions_subtitles"
+  ],
+  "capability_status": {
+    "story.multi_scene_storyboard": "confirmed",
+    "video.from_storyboard": "confirmed",
+    "motion.data_visualization": "confirmed",
+    "motion.kinetic_typography": "confirmed",
+    "motion.product_animation": "confirmed",
+    "motion.exploded_view": "unknown",
+    "motion.overlay_graphics": "unknown",
+    "video.text_to_video": "unknown",
+    "video.image_to_video": "unknown",
+    "story.character_consistency": "unknown",
+    "edit.trim_and_cut": "unknown",
+    "edit.captions_subtitles": "confirmed",
+    "edit.audio_mix": "confirmed",
+    "edit.assemble_clips": "unknown",
+    "edit.transitions": "unknown",
+    "fashion.garment_film": "unknown"
+  },
+  "extra_capabilities": [
+    "document/slide/HWP/CSV to explainer video",
+    "narration TTS (ko/en/ja) with timed captions",
+    "voice cloning",
+    "music generation",
+    "lip-synced AI presenter",
+    "image-to-3D product models",
+    "3D staged scenes and type",
+    "instruction-based edits of its own film",
+    "vertical presenter shorts"
+  ],
+  "input_modalities": [
+    "text",
+    "image",
+    "video",
+    "audio",
+    "document",
+    "url"
+  ],
+  "input_modalities_status": "confirmed",
+  "capability_requirements": {},
+  "accepts_handoff": [
+    "image_file",
+    "video_file",
+    "audio_file"
+  ],
+  "emits": [
+    "video_file",
+    "storyboard_json"
+  ],
+  "best_for": [
+    "explainer, pitch or report videos from documents and slide decks (incl. Korean HWP)",
+    "animated charts, tables, diagrams and key figures from data or CSV",
+    "kinetic and 3D titles, product turntables",
+    "narrated ko/en/ja corporate and product films",
+    "vertical presenter shorts with an AI presenter"
+  ],
+  "not_good_for": [
+    "photoreal cinematic or character-driven stories",
+    "editing, captioning or reformatting existing footage",
+    "exploded-view or assembly animation",
+    "fashion films",
+    "videos longer than 90 s"
+  ],
+  "fallback_apps": [],
+  "profile": {
+    "shot_structures": {
+      "value": [
+        "multi_scene"
+      ],
+      "status": "confirmed"
+    },
+    "max_duration_s": {
+      "value": 90,
+      "status": "confirmed"
+    },
+    "aspect_ratios": {
+      "value": [
+        "16:9",
+        "9:16",
+        "1:1"
+      ],
+      "status": "confirmed"
+    },
+    "motion_styles": {
+      "value": [
+        "programmatic_precise"
+      ],
+      "status": "confirmed"
+    },
+    "accepts_asset_roles": {
+      "value": [
+        "product",
+        "logo",
+        "background",
+        "style_reference",
+        "footage_to_edit",
+        "audio_track"
+      ],
+      "status": "confirmed"
+    },
+    "audio_output": {
+      "value": [
+        "narration",
+        "captions",
+        "music"
+      ],
+      "status": "confirmed"
+    }
+  },
+  "profile_notes": "From source v0.0.59 (read 2026-11-13). Durations 20/30/40/50/60/90 s; 1080p at 30 fps; always multi-scene (min 3). AI b-roll and presenter are optional extras. Narration, music and captions are part of its own production (it does not caption or re-mix footage made elsewhere). DISABLED in Palette-Video (2026-11-13): its renderer (JavaScript/Three.js via headless Chrome) is not embedded yet; set status to \"available\" to route to it again."
+}
