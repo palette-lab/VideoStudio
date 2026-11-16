@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------- secrets (never commit)
+# API keys live in .env files: PALETTE_API_KEY, FAL_KEY, ... (uploaded as encrypted plugin secrets on publish)
+.env
+.env.*
+*.env
+.palette/.env.local
+.palette/*.env
+!/.env.example
+# keys, certificates and credential files
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*.jks
+id_rsa*
+id_ed25519*
+credentials*.json
+service-account*.json
+*-service-account.json
+.netrc
+.npmrc
+.pypirc
+
+# ---------------------------------------------------------------- private data (users' files and runs)
+# Local dev storage: uploaded photos, videos and documents of real people and products
+.palette/dev-storage/
+# Local dev database: every run's prompt, plan, file paths and results
+.palette/dev/
+*.sqlite
+*.sqlite3
+*.db
+# Rendered videos and work folders
+outputs/
+renders/
+work/
+
+# ---------------------------------------------------------------- local runtimes and caches
+.palette/test-venv/
+.venv/
+venv/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+*.log
+dist/
+build/
+*.egg-info/
+
+# ---------------------------------------------------------------- local open-source models (installed per machine)
+# Presenter Studio, effects and music: see tools/local_lipsync/README.md and tools/local_music/setup.sh
+tools/vendor-src/ditto-talkinghead/
+tools/vendor-src/kokoro-models/
+*.onnx
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.tflite
+*.bin
+
+# ---------------------------------------------------------------- OS / editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
