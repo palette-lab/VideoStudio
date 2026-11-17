@@ -26,7 +26,7 @@ log = logging.getLogger("palette_video.story_intel")
 
 PASS_SCORE = 80
 BLOCKING = ("story", "facts", "puzzle")
-SKIP_AGENTS = {"food"}  # the recipe engine owns cooking films
+SKIP_AGENTS = {"food", "presenter"}  # the recipe engine owns cooking films; Presenter Studio writes its own script
 
 
 async def _json(msgs: list[dict], stage: str, tokens: int = 8000, effort: str | None = None) -> dict:

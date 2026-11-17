@@ -24,7 +24,8 @@ def applies(run: dict) -> bool:
     intel = run.get("story_intel") or {}
     if not (intel.get("plan") or {}).get("scenes"):
         return False
-    if (intel.get("classification") or {}).get("category") == "presenter":
+    cls = intel.get("classification") or {}
+    if "presenter" in (cls.get("category"), cls.get("agent")):
         return False  # a person talking to camera: Presenter Studio (lip-sync) through the router
     if run.get("mode") in ("presenter", "motion", "analyze", "hybrid", "normal"):
         return False  # the user asked for a specific app or for the full analysis

@@ -286,3 +286,26 @@ def test_3d_motion_video_mode_forces_the_3d_director_for_any_topic(monkeypatch):
     assert pipeline.APP_MODES["motion3d"] == "pltt-storyboard-video-maker"
     stages.clear()  # without the mode the food agent keeps the cooking film
     assert asyncio.run(story_intel.develop("how sourdough rises")).get("skipped") and stages == ["story.classify"]
+
+
+def test_a_talking_host_skips_the_story_writer_and_never_becomes_a_storyboard_film(monkeypatch):
+    from engines.story_intel import direct
+    stages = []
+
+    async def fake(model, messages, **kw):
+        stages.append(kw["stage"])
+        if kw["stage"] == "story.classify":  # what the classifier really returned for the compound-interest host
+            return {"category": "educational", "agent": "presenter", "production": "cinematic", "has_topic": True,
+                    "research": "light", "duration_s": 60}
+        raise AssertionError(kw["stage"])
+    monkeypatch.setattr(story_intel.llm, "chat_json", fake)
+    intel = asyncio.run(story_intel.develop("A 60-second YouTube explainer: a friendly host at a desk explains "
+                                            "how compound interest works"))
+    assert intel.get("skipped") and "plan" not in intel and stages == ["story.classify"]
+    # A story written before this fix (agent presenter, category educational) still goes through the router.
+    old = {"mode": "auto", "assets": {}, "story_intel": {"plan": {"scenes": [{"n": 1}]},
+                                                         "classification": {"category": "educational",
+                                                                            "agent": "presenter"}}}
+    assert direct.applies(old) is False
+    old["story_intel"]["classification"]["agent"] = "explainer"
+    assert direct.applies(old) is True
