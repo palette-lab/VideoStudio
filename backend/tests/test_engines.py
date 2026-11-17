@@ -52,22 +52,27 @@ def test_engine_plans_makes_stills_clips_and_joins(app_id, tmp_path, monkeypatch
 
     def fake_image(key, model, prompt, **kw):
         seen["images"] += 1
-        if prompt.startswith("Character turnaround reference sheet of girl, 10, red coat"):  # the user's template
-            assert kw["aspect_ratio"] == "16:9" and "full-body side profile view" in prompt
-            assert "solid flat mid-gray background" in prompt and "image_urls" not in kw
-            seen["sheet"] = True
-            return {"images": [{"url": "https://fal.media/sheet.png"}]}
-        if prompt.startswith("LOOK FRAME"):  # the film's world, drawn once beside the sheet
+        if prompt.startswith("PASSPORT-STYLE ID PORTRAIT of girl, 10, red coat"):  # the character comes first
+            assert kw["aspect_ratio"] == "3:4" and "whole hairstyle" in prompt and "image_urls" not in kw
+            seen["passport"] = True
+            return {"images": [{"url": "https://fal.media/passport.png"}]}
+        if prompt.startswith(("FULL-BODY FRONT VIEW of girl", "FULL-BODY BACK VIEW of girl")):  # from the portrait
+            assert kw["image_urls"] == ["https://fal.media/passport.png"] and kw["aspect_ratio"] == "9:16"
+            side = "front" if "FRONT" in prompt[:20] else "back"
+            seen[side] = True
+            return {"images": [{"url": f"https://fal.media/{side}.png"}]}
+        if prompt.startswith("LOOK FRAME"):  # the film's world, drawn once beside the characters
             seen["look"] = True
             return {"images": [{"url": "https://fal.media/look.png"}]}
         assert "GLOBAL STYLE" in prompt and kw["aspect_ratio"] == "9:16"
+        assert not seen["videos"]  # every scene image is drawn before any clip starts
         if prompt.startswith("The LAST frame"):
             seen["end"] = "https://fal.media/end1.png"
             return {"images": [{"url": seen["end"]}]}
-        if seen.get("end") and "girl hugs cat" in prompt:  # scene 2 starts from scene 1's LAST frame
-            seen["chained"] = kw["image_urls"][-1] == seen["end"]
-        if seen.get("sheet"):  # every scene still is made from the turnaround sheet
-            assert kw["image_urls"][0] == "https://fal.media/sheet.png" and "turnaround sheet" in prompt
+        # every scene with the girl is drawn from her passport portrait, front and back, then the look frame
+        assert kw["image_urls"][:4] == ["https://fal.media/passport.png", "https://fal.media/front.png",
+                                        "https://fal.media/back.png", "https://fal.media/look.png"]
+        assert "CHARACTER REFERENCES: reference images 1-3" in prompt
         return {"images": [{"url": f"https://fal.media/still{seen['images']}.png"}]}
 
     def fake_video(key, model, prompt, **kw):
@@ -105,16 +110,17 @@ def test_engine_plans_makes_stills_clips_and_joins(app_id, tmp_path, monkeypatch
     assert marker in seen["system"]  # the app's own planner prompt
     if app_id == "pltt-flow-video-2":
         assert "ENGINES (the models that render this film" in seen["system"]
-    assert seen.get("chained") is True
-    # the sheet, the look frame, one still per scene, one last frame, and one redraw after the AI check found an
-    # extra plate
-    assert seen["images"] == 6 and seen["sheet"] and seen["look"] and len(out["scenes"]) == 2
+    # passport, front and back, the look frame, one still per scene, one last frame, and one redraw after the AI
+    # check found an extra plate
+    assert seen["images"] == 8 and seen["passport"] and seen["front"] and seen["back"] and seen["look"]
+    assert len(out["scenes"]) == 2
     assert seen["qa"] == 4  # every frame analysed (3) plus the redraw re-checked
     assert out["scenes"][0]["qa"]["first"] == {"issues": [], "redrawn": True,
                                                "fixed": ["an extra plate on the table -> remove it"]}
     assert out["scenes"][0]["image_prompt"] and out["scenes"][0]["motion_prompt"]
     assert seen["clip_qa"] == 2 and out["scenes"][1]["qa"]["clip"] == {"issues": [], "retaken": False}
-    assert out["plan"]["cast_sheet_url"] == "https://fal.media/sheet.png" and seen["checks"] == 2
+    assert out["plan"]["cast_sheet_url"] == "https://fal.media/passport.png" and seen["checks"] == 2
+    assert out["plan"]["cast"][0]["back"] == "https://fal.media/back.png"
     assert out["plan"]["total"] == 10 and out["plan"]["requested_total"] == 40  # test quality caps the length
     assert 9.5 < out["duration_s"] < 10.5
     assert any("planning" in m for m in msgs) and any("joining" in m for m in msgs)
@@ -250,7 +256,7 @@ def test_continuity_sheet_becomes_hard_rules():
                        "never": ["sneakers"]}]}
     text = story_engine._locks(c)
     assert "red rain boots" in text and "never: sneakers" in text
-    assert story_engine.recurring_subject({"continuity": c, "scenes": [{}]})
+    assert story_engine.recurring_subject({"continuity": c, "scenes": [{}]}) and story_engine.has_cast({"continuity": c})
     assert not story_engine.recurring_subject({"bible": {"characters": ""}, "scenes": [{}, {}]})
 
 
@@ -303,18 +309,148 @@ def test_large_change_does_not_morph_and_retake_lists_the_problems():
     assert "AVOID" in retake and "second hare" in retake and "AVOID" not in se._motion("x", s, q)
 
 
-def test_turnaround_sheet_uses_the_users_template_per_character():
+def test_each_character_gets_passport_front_and_back_and_only_its_scenes_use_them():
     p = {"bible": {"characters": "unused", "grading": "warm 35mm film look"},
          "continuity": {"entities": [{"kind": "character", "name": "Mina", "locked": ["30s", "short black bob", "navy suit"]},
                                      {"kind": "prop", "name": "mug"},
                                      {"kind": "character", "name": "Leo", "locked": ["10", "red raincoat"]}]}}
     members = story_engine.cast_members(p)
     assert members == ["Mina: 30s; short black bob; navy suit", "Leo: 10; red raincoat"]
-    prompt = story_engine.turnaround_prompt(members[0], story_engine.art_style(p))
-    assert prompt == ("Character turnaround reference sheet of Mina: 30s; short black bob; navy suit, showing four views "
-                      "side-by-side: a close-up front portrait of the face, full-body front view, full-body side profile "
-                      "view, and full-body back view. Standing in a neutral relaxed pose, even studio lighting, solid "
-                      "flat mid-gray background, no text, no labels, clean sharp focus, warm 35mm film look.")
-    assert story_engine.cast_members({"bible": {"characters": "a girl, 10, red coat"}}) == ["a girl, 10, red coat"]
+    views = {v: t for v, _, t in story_engine.CAST_VIEWS}
+    prompt = story_engine.view_prompt(views["passport"], members[0], story_engine.art_style(p))
+    assert prompt.startswith("PASSPORT-STYLE ID PORTRAIT of Mina: 30s; short black bob; navy suit: head and shoulders")
+    assert "whole hairstyle" in prompt and prompt.endswith("warm 35mm film look.")
+    assert "back of the hairstyle" in views["back"] and "head to toe" in views["front"]
+    # a bible that lists its characters gives one per character, not one combined description
+    listed = {"bible": {"characters": [{"name": "Asha", "look": "long braid"}, "an old fisherman"]}}
+    assert story_engine.cast_members(listed) == ["Asha: long braid", "an old fisherman"]
     assert story_engine.art_style({}) == "photorealistic, true-to-life detail"
-    assert "FIRST 2 reference images are character turnaround sheets" in story_engine._cast_note(2)
+    cast = [{"name": "Mina", "urls": ["m1", "m2", "m3"], "views": ["passport portrait", "full-body front", "full-body back"]},
+            {"name": "Leo", "urls": ["l1"], "views": ["passport portrait"]}]
+    assert story_engine.scene_cast({"image_prompt": "Leo jumps in a puddle"}, cast) == [cast[1]]
+    assert story_engine.scene_cast({"image_prompt": "a woman pours tea"}, cast) == cast  # unnamed person: everyone
+    assert story_engine.scene_cast({"image_prompt": "macro of a steaming mug"}, cast) == []  # no person: no refs
+    note = story_engine._cast_note(cast)
+    assert "reference images 1-3 are Mina" in note and "reference image 4 is Leo" in note and "blank" in note
+    assert "reference images 2-4 are Mina" in story_engine._cast_note(cast, first=2)
+
+
+def test_archive_photos_are_fetched_politely_and_pinned_exactly(tmp_path, monkeypatch):
+    import httpx
+    seen = {}
+
+    def handler(request):
+        seen["ua"] = request.headers["user-agent"]
+        return httpx.Response(200, content=b"jpeg-bytes")
+    real = httpx.AsyncClient
+    monkeypatch.setattr(story_engine.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+
+    async def fake_upload(path):
+        return f"https://fal.media/{path.rsplit('/', 1)[-1]}"
+    monkeypatch.setattr(story_engine, "_upload", fake_upload)
+    photos = [{"id": "A1", "url": "https://upload.wikimedia.org/a/First_flight.jpg", "what": "First flight"},
+              {"id": "A2", "url": "https://upload.wikimedia.org/b/unused.jpg", "what": "unused"}]
+    got = asyncio.run(story_engine.archive_refs(photos, [{"archive": ["A1"]}, {}], tmp_path))
+    assert got == {"A1": "https://fal.media/A1.jpg"} and "VideoStudio-story-research" in seen["ua"]
+    note = story_engine._archive_note([photos[0]], 3)
+    assert "reference image 3 is a REAL ARCHIVE PHOTO (First flight)" in note and "never redrawn" in note
+    assert story_engine._archive_note([], 1) == ""
+
+
+def _talk(path, seconds=3):
+    """A clip WITH sound (the host's lip-synced line)."""
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c=green:size=480x854:rate=24:duration={seconds}",
+                    "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}", "-shortest", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", str(path)], check=True)
+
+
+@pytest.mark.parametrize("host_works", [True, False])
+def test_documentary_host_is_cut_in_on_camera_or_narrated_when_lipsync_fails(host_works, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAL_KEY", "test-key")
+    monkeypatch.setenv("PALETTE_VIDEO_QUALITY", "test")
+    board_clip = tmp_path / "board.mp4"
+    _clip(board_clip, "blue")
+    seen = {"images": [], "videos": 0, "host": None, "narrated": []}
+
+    async def fake_chat(model, messages, **kw):
+        stage = kw.get("stage") or ""
+        if stage == "engine.critic":  # an approved Story Intelligence plan is not reviewed a second time
+            raise AssertionError("the approved story was reviewed again")
+        if stage in ("engine.scene_qa", "engine.clip_qa"):
+            return {"ok": True, "issues": []}
+        return {"title": "Unsinkable", "story": "A ship sinks.", "bible": {"characters": ""},
+                "scenes": [{"title": "Host open", "duration": 5, "image_prompt": "host", "camera": "static",
+                            "voice": "on_camera", "sound": "One night in April."},
+                           {"title": "The ship", "duration": 5, "image_prompt": "pinned print of a liner on cork",
+                            "camera": "slow push-in", "voice": "narration", "script": "The ship left port."}]}
+
+    def fake_image(key, model, prompt, **kw):
+        seen["images"].append(prompt[:40])
+        return {"images": [{"url": f"https://fal.media/img{len(seen['images'])}.png"}]}
+
+    def fake_video(key, model, prompt, **kw):
+        seen["videos"] += 1
+        return {"video": {"url": "https://fal.media/board.mp4"}}
+
+    async def fake_download(url, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(board_clip, dest)
+        return str(dest)
+
+    async def fake_host(app, host, lines, ar, work, progress, language="english"):
+        seen["host"] = (host["voice_gender"], lines)
+        if not host_works:
+            raise RuntimeError("every lip-sync model failed")
+        out = tmp_path / "host_01.mp4"
+        _talk(out)
+        return [str(out)]
+
+    async def fake_narration(lines, work, key, language="english", used=None, gender="female"):
+        out = []
+        for i, line in enumerate(lines):
+            if not line:
+                out.append(None)
+                continue
+            seen["narrated"].append((line, gender))
+            f = tmp_path / f"vo_{len(seen['narrated'])}.wav"
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=220:duration=1.5",
+                            str(f)], check=True)
+            out.append(str(f))
+        return out
+
+    async def passthrough(app, brief, plan, video, *a, **kw):
+        return {"path": video, "clean": video, "text_layer": {"items": []}, "effects": None, "graphics": None}
+
+    from engines import presenter_engine, text_layer
+    monkeypatch.setattr(story_engine.llm, "chat_json", fake_chat)
+    monkeypatch.setattr(story_engine.fal_helper, "generate_image", fake_image)
+    monkeypatch.setattr(story_engine.fal_helper, "generate_video", fake_video)
+    monkeypatch.setattr(story_engine, "_download", fake_download)
+    monkeypatch.setattr(story_engine, "record_narration", fake_narration)
+    monkeypatch.setattr(presenter_engine, "host_clips", fake_host)
+    monkeypatch.setattr(text_layer, "finish", passthrough)
+    monkeypatch.setattr(story_engine.music, "available", lambda: "off in tests")
+
+    story = {"mode": "cinematic_doc", "classification": {"language": "en"},
+             "plan": {"host": {"look": "a calm man in his fifties", "voice_gender": "male"},
+                      "scenes": [{"n": 1, "host": True, "duration_s": 5,
+                                  "audio": {"type": "dialogue", "line": "One night in April, a ship sank."}},
+                                 {"n": 2, "duration_s": 5, "hero": "the liner print",
+                                  "audio": {"type": "narration", "line": "The ship left port."}}]}}
+    handoff = {"prompt": "titanic documentary", "_story": story,
+               "request": {"duration": 10, "total_duration": 10, "aspect_ratio": "9:16"}}
+
+    async def progress(m):
+        pass
+
+    out = asyncio.run(story_engine.run({"app_id": "pltt-storyboard-video-maker", "name": "App"}, handoff, {},
+                                       tmp_path / "work", progress))
+    assert seen["host"] == ("male", ["One night in April, a ship sank."])
+    from engines.vendor.flow import video_merge
+    assert video_merge.has_audio_stream(video_merge.find_ffmpeg(), out["path"])  # the host's voice survives the join
+    if host_works:
+        assert out["scenes"][0]["host"] and out["scenes"][0]["model"] == "host (lip-sync)"
+        assert seen["videos"] == 1 and not any("host" == p for p in seen["images"])  # only the board scene is filmed
+        assert seen["narrated"] == [("The ship left port.", "male")]  # the narrator IS the host's voice
+    else:  # no lip-sync: the host's line is narrated over a board scene and the film still finishes
+        assert seen["videos"] == 2 and ("One night in April, a ship sank.", "male") in seen["narrated"]

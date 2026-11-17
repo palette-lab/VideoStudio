@@ -5,6 +5,8 @@
     architect()       StoryArchitect + CharacterContinuity + ScenePlanner + CinematicPromptDirector + AudioPlanner
                       + MotionDesignDirector    story, continuity bible, scenes (21 fields + A-L prompt), audio, effects
     validate()        SceneValidationAgent + FactVerificationAgent (+ an independent puzzle solver) -> one revision
+    documentary.*     Cinematic Documentary Director (documentaries and factual presentations): the cinematic-skill
+                      method - one world, one camera, one hero per line, hits on the spoken word, editable type
     motion.*          3D Motion Graphics Director (education, finance, business, science, study, commercial
                       explainers): script beats, palette lock, keyframe + motion prompts, capabilities
     regenerate_scene / apply_edits / switch_palette   change one scene or the palette, keep the rest
@@ -20,7 +22,7 @@ import time
 
 from router_core import config, llm
 
-from . import agents, motion, research as research_, validate as validate_
+from . import agents, documentary, motion, research as research_, validate as validate_
 
 log = logging.getLogger("palette_video.story_intel")
 
@@ -93,18 +95,48 @@ def _architect_user(prompt: str, cls: dict, res: dict | None, files: list[dict],
     return "\n\n".join(parts)
 
 
+def merge_patch(previous: dict, patch: dict) -> dict:
+    """A revision that returned only what changed, applied to the previous plan (scenes replaced by their "n")."""
+    out = {**previous, **{k: v for k, v in patch.items() if k not in ("scenes", "scenes_all")}}
+    if isinstance(patch.get("scenes_all"), list) and patch["scenes_all"]:
+        out["scenes"] = [s for s in patch["scenes_all"] if isinstance(s, dict)]
+        return out
+    scenes = [dict(s) for s in previous.get("scenes") or [] if isinstance(s, dict)]
+    for s in patch.get("scenes") or []:
+        try:
+            n = int(s.get("n")) if isinstance(s, dict) else 0
+        except (TypeError, ValueError):
+            continue
+        if 1 <= n <= len(scenes):
+            scenes[n - 1] = {**scenes[n - 1], **s}
+    out["scenes"] = scenes
+    return out
+
+
+def _fix_msgs(feedback: list[dict], previous: dict) -> list[dict]:
+    return [{"role": "assistant", "content": json.dumps(previous, ensure_ascii=False)[:60000]},
+            {"role": "user", "content": agents.REVISE_PATCH.replace("{ISSUES}", "\n".join(
+                f"- {'scene ' + str(i['scene']) if i.get('scene') else 'film'} [{i.get('area')}]: "
+                f"{i.get('problem')} -> {i.get('fix')}" for i in feedback))}]
+
+
 async def architect(prompt: str, cls: dict, res: dict | None, files: list[dict], aspect_ratio,
-                    feedback: list[dict] | None = None, previous: dict | None = None) -> dict:
+                    feedback: list[dict] | None = None, previous: dict | None = None, doc: bool = False) -> dict:
     system = (agents.ARCHITECT.replace("{CATEGORY}", f"{cls['category']} - {agents.CATEGORIES[cls['category']]}")
               .replace("{SHAPE}", agents.SHAPES[cls["category"]]))
+    archive = cls.get("_archive") or []
+    if doc:  # documentaries and factual presentations: the cinematic-skill master prompt
+        system = documentary.system(system, bool(archive))
     msgs = [{"role": "system", "content": system},
-            {"role": "user", "content": _architect_user(prompt, cls, res, files, aspect_ratio)}]
-    if feedback and previous:
-        msgs += [{"role": "assistant", "content": json.dumps(previous, ensure_ascii=False)[:60000]},
-                 {"role": "user", "content": agents.REVISE.replace("{ISSUES}", "\n".join(
-                     f"- {'scene ' + str(i['scene']) if i.get('scene') else 'film'} [{i.get('area')}]: "
-                     f"{i.get('problem')} -> {i.get('fix')}" for i in feedback))}]
-    plan = await _json(msgs, "story.architect" + (".revise" if feedback else ""), 32000)
+            {"role": "user", "content": _architect_user(prompt, cls, res, files, aspect_ratio)
+             + ("\n\n" + documentary.archive_note(archive) if doc and archive else "")}]
+    revising = bool(feedback and previous)
+    if revising:
+        msgs += _fix_msgs(feedback, previous)
+    stage = ("story.documentary" if doc else "story.architect") + (".revise" if revising else "")
+    plan = await _json(msgs, stage, 16000 if revising else 32000)
+    if revising:
+        plan = merge_patch(previous, plan)
     scenes = [s for s in plan.get("scenes") or [] if isinstance(s, dict)]
     for n, s in enumerate(scenes, start=1):
         s["n"] = n
@@ -126,15 +158,18 @@ async def solve_puzzle(plan: dict) -> dict | None:
         return None
 
 
-async def review(prompt: str, cls: dict, plan: dict, res: dict | None) -> dict:
+async def review(prompt: str, cls: dict, plan: dict, res: dict | None, doc: bool = False) -> dict:
     """The rule checks plus the LLM review (with the independent solver's answer for puzzles)."""
     rules = validate_.lint(plan, cls.get("duration_s"), cls.get("category", ""))
+    if doc:
+        rules += documentary.lint(plan, {p["id"] for p in cls.get("_archive") or []})
     solver = await solve_puzzle(plan) if cls.get("category") == "puzzle_mystery" else None
     body = {"request": prompt, "category": cls.get("category"), "plan": plan,
             "research": {k: (res or {}).get(k) for k in ("facts", "timeline", "conflicts", "note")} if res else None,
             "independent_solver": solver}
     try:
-        llm_review = await _json([{"role": "system", "content": agents.VALIDATOR},
+        checker = agents.VALIDATOR + (DOC_REVIEW if doc else "")
+        llm_review = await _json([{"role": "system", "content": checker},
                                   {"role": "user", "content": json.dumps(body, ensure_ascii=False)[:90000]}],
                                  "story.validate", 8000, "medium")
     except llm.LLMError as e:
@@ -155,6 +190,13 @@ async def review(prompt: str, cls: dict, plan: dict, res: dict | None) -> dict:
             "strengths": llm_review.get("strengths") or [], "solver": solver}
 
 
+DOC_REVIEW = """
+This is a CINEMATIC DOCUMENTARY plan (the cinematic-skill method). Also check: one hero per line; the visual hit on
+a word the narrator says; time only moves forward after the bridge line; no phrase both typed and spoken word for
+word; no invented quote; and NO generated face for a real person (they appear only as an uploaded archive photo, a
+document, hands, tools, a silhouette or a back view) - a stand-in face is a "facts" issue."""
+
+
 async def develop(prompt: str, files: list[dict] | None = None, documents: list[dict] | None = None,
                   duration_s=None, aspect_ratio=None, progress=None, force_motion: bool = False) -> dict:
     """The whole pipeline. Returns the story intelligence record kept on the run."""
@@ -168,6 +210,13 @@ async def develop(prompt: str, files: list[dict] | None = None, documents: list[
     intel = {"classification": cls, "version": 1}
     if cls.get("agent") in SKIP_AGENTS and not force_motion:
         intel["skipped"] = f"handled by the {cls['agent']} agent"
+        if cls["agent"] == "presenter" and (cls.get("research") not in (None, "", "none") or documents):
+            # a presentation still gets the cinematic-skill research: the host's script states only sourced facts
+            await _maybe(say, f"Story: researching {cls.get('subject') or 'the topic'} for the presenter's script")
+            try:
+                intel["research"] = await do_research(cls, prompt, documents)
+            except llm.LLMError as e:
+                log.warning("presenter research failed: %s", e)
         return intel
     if cls.get("has_topic") is False:  # stage 1 (topic ideas) needs no research rabbit hole
         cls["research"] = "none"
@@ -177,16 +226,24 @@ async def develop(prompt: str, files: list[dict] | None = None, documents: list[
     intel["research"] = res
     if is_motion(cls):
         return await _develop_motion(intel, prompt, cls, res, files, aspect_ratio, say, t0)
-    await _maybe(say, f"Story: writing the {cls['category'].replace('_', ' ')} and directing each scene")
-    plan = await architect(prompt, cls, res, files, aspect_ratio)
+    doc = documentary.applies(cls)
+    if doc:
+        intel["mode"] = "cinematic_doc"
+        if cls.get("is_factual") or cls.get("category") == "documentary":  # real photos for real people and events
+            await _maybe(say, "Cinematic documentary director: finding free archive photos (Wikimedia Commons)")
+            cls["_archive"] = intel["archive"] = await research_.archive_photos(research_.archive_queries(cls, prompt))
+        await _maybe(say, "Cinematic documentary director: research, script, one world and one camera, scene by scene")
+    else:
+        await _maybe(say, f"Story: writing the {cls['category'].replace('_', ' ')} and directing each scene")
+    plan = await architect(prompt, cls, res, files, aspect_ratio, doc=doc)
     await _maybe(say, "Story: validating the story, facts and scenes")
-    rev = await review(prompt, cls, plan, res)
+    rev = await review(prompt, cls, plan, res, doc)
     first = rev
     if not rev["passed"]:
         await _maybe(say, f"Story: fixing {len(rev['rules']) + len(rev['issues'])} problem(s)")
         try:
-            plan2 = await architect(prompt, cls, res, files, aspect_ratio, rev["rules"] + rev["issues"], plan)
-            rev2 = await review(prompt, cls, plan2, res)
+            plan2 = await architect(prompt, cls, res, files, aspect_ratio, rev["rules"] + rev["issues"], plan, doc)
+            rev2 = await review(prompt, cls, plan2, res, doc)
             if plan2.get("scenes") and _better(rev2, rev):
                 plan, rev = plan2, {**rev2, "first_score": first["score"], "revised": True}
         except llm.LLMError as e:
@@ -213,11 +270,9 @@ async def _direct(prompt: str, cls: dict, res: dict | None, files: list[dict], a
                   keep_style: dict | None = None) -> dict:
     msgs = motion.messages(prompt, cls, res, _files_note(files), _apps(), aspect_ratio, palette, keep_script, keep_style)
     if feedback and previous:
-        msgs += [{"role": "assistant", "content": json.dumps(previous, ensure_ascii=False)[:60000]},
-                 {"role": "user", "content": agents.REVISE.replace("{ISSUES}", "\n".join(
-                     f"- {'scene ' + str(i['scene']) if i.get('scene') else 'film'} [{i.get('area')}]: "
-                     f"{i.get('problem')} -> {i.get('fix')}" for i in feedback))}]
-    return await _json(msgs, "story.motion_director" + (".revise" if feedback else ""), 24000, "medium")
+        msgs += _fix_msgs(feedback, previous)
+        return merge_patch(previous, await _json(msgs, "story.motion_director.revise", 16000, "medium"))
+    return await _json(msgs, "story.motion_director", 24000, "medium")
 
 
 async def _motion_review(prompt: str, cls: dict, plan: dict, res: dict | None) -> dict:
@@ -284,8 +339,16 @@ async def switch_palette(intel: dict, option: int, prompt: str, files: list[dict
 
 
 def _better(a: dict, b: dict) -> bool:
-    bad = lambda r: len(r["rules"]) + 2 * len([i for i in r["issues"] if i.get("area") in ("story", "facts", "puzzle")])
-    return (a["passed"] and not b["passed"]) or bad(a) < bad(b) or ((a["score"] or 0) > (b["score"] or 0) and bad(a) == bad(b))
+    """Is review a (the revision) better than b? Passing first, then fewer blocking problems (story, facts,
+    puzzle), then the reviewer's score - a revision that scores lower is never kept for having fewer rule notes."""
+    if a["passed"] != b["passed"]:
+        return a["passed"]
+    blocking = lambda r: len([i for i in r["issues"] if i.get("area") in BLOCKING])
+    if blocking(a) != blocking(b):
+        return blocking(a) < blocking(b)
+    if a["score"] is not None and b["score"] is not None and a["score"] != b["score"]:
+        return a["score"] > b["score"]
+    return len(a["rules"]) < len(b["rules"])
 
 
 async def _maybe(fn, msg):
@@ -345,6 +408,8 @@ def _relint(intel: dict) -> None:
     v["rules"] = validate_.lint(intel["plan"], cls.get("duration_s"), cls.get("category", ""))
     if intel.get("mode") == "motion_graphics":
         v["rules"] += motion.lint(intel["plan"], bool(intel.get("stylized_ok")))
+    if intel.get("mode") == "cinematic_doc":
+        v["rules"] += documentary.lint(intel["plan"], {p["id"] for p in intel.get("archive") or []})
     v["edited_at"] = time.time()
 
 
@@ -358,8 +423,17 @@ def as_brief(intel: dict) -> str:
         # Said plainly, so the router plans ONE filming app: no programmatic charts, overlay graphics or text pass.
         out.append(f"Production: {len(plan.get('scenes') or [])} scenes, each ONE AI-generated photoreal 3D clip "
                    "animated from its own 3D keyframe image, with narration and music. Every on-screen word is part of "
-                   "the 3D keyframe image itself. No separate graphics, charts, overlays or text animation pass. "
+                   "an editable text layer the filming app sets itself. No separate graphics, charts, overlays or text animation pass. "
                    f"Format: {intel.get('aspect_ratio') or '9:16'} vertical.")
+    if intel.get("mode") == "cinematic_doc":
+        out.append(f"Production: a cinematic documentary in the '{plan.get('look') or 'wall'}' look - "
+                   f"{len(plan.get('scenes') or [])} scenes, each ONE AI clip of one camera move across one designed "
+                   "world, one hero per narration line, with narration, sound effects and music"
+                   + (", opened and closed by a host speaking on camera (lip-synced by the same filming app), who "
+                      "also narrates the board scenes" if any(s.get("host") for s in plan.get("scenes") or []) else "")
+                   + ". Every typed word "
+                   "(dates, names, stamps, numbers) is an editable text layer the filming app sets itself. No separate "
+                   "graphics, charts, overlays or text animation pass.")
     if plan.get("story_concept"):
         out.append(plan["story_concept"])
     for s in plan.get("scenes") or []:
@@ -378,7 +452,8 @@ def engine_block(intel: dict) -> str:
     plan = intel.get("plan") or {}
     keep = ("n", "title", "duration_s", "what_happens", "actions", "emotions", "positioning", "framing",
             "camera_movement", "lens", "lighting", "atmosphere", "sfx", "audio", "transition_in", "start_state",
-            "end_state", "props", "on_screen_text", "in_scene_text", "typography_style")
+            "end_state", "props", "on_screen_text", "in_scene_text", "overlay_text", "typography_style",
+            "hero", "hit_word", "items", "cluster", "archive", "host")
     scenes = []
     for s in plan.get("scenes") or []:
         d = {k: s.get(k) for k in keep if s.get(k)}
@@ -390,7 +465,20 @@ def engine_block(intel: dict) -> str:
         scenes.append(d)
     body = {"title": plan.get("title"), "story": plan.get("story_concept"), "bible": plan.get("bible"),
             "style": plan.get("style"), "audio_plan": plan.get("audio_plan"), "scenes": scenes}
+    if intel.get("mode") == "cinematic_doc":
+        body["mode"] = (f"cinematic documentary, '{plan.get('look') or 'wall'}' look, accent {plan.get('accent') or ''}: "
+                        "one designed world and one continuous camera across it; each scene lands on its \"hero\" "
+                        "with the spotlight on it and the hit on its \"hit_word\"; NO letters, numbers or readable "
+                        "words in any image or clip (documents show grey rows, stamps and labels are blank shapes) - "
+                        "each scene's overlay_text is an editable text layer added on top; never a generated face "
+                        "for a real person")
+        if isinstance(plan.get("host"), dict):
+            body["host"] = plan["host"]
+            body["mode"] += ("; the scenes marked \"host\" are the presenter on camera (filmed and lip-synced by the "
+                             "engine itself), every other scene is the board narrated in the host's voice")
+        if intel.get("archive"):
+            body["archive"] = [{"id": p["id"], "what": p["what"][:200]} for p in intel["archive"]]
     if intel.get("mode") == "motion_graphics":
-        body["mode"] = ("full 3D motion graphics (locked palette; each scene's words are 3D letters INSIDE the keyframe, "
-                        "spelled exactly - no flat text overlay)")
+        body["mode"] = ("full 3D motion graphics (locked palette; NO text, letters or logos in any keyframe or clip - "
+                        "each scene's words are an editable text layer added on top after the film is made)")
     return json.dumps(body, ensure_ascii=False)

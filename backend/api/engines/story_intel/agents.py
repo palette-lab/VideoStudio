@@ -61,6 +61,9 @@ Return ONLY JSON:
  "is_factual": true when the film states real-world facts (history, science, real people, products),
  "research": "none | light | deep" (fiction and fables: none; well-known facts: light; history, science,
  real events: deep), "research_queries": ["up to 4 short encyclopedia searches for the facts this film needs"],
+ "archive_queries": ["for real-world subjects only: up to 4 SHORT Wikimedia Commons searches of 1-3 words (a
+  name, a place, an object, a period painting or map, e.g. "Mount Tambora", "Villa Diodati") for real photos,
+  paintings, maps and documents the film could pin; [] for fiction"],
  "language": "en | ko | ... (the language of the request)",
  "duration_s": the film's length in seconds (the user's number if given, otherwise what this story needs: a fable
  45-75, a puzzle 45-90, an explainer 45-90, a documentary 60-90, an ad 20-30),
@@ -181,8 +184,15 @@ Return ONLY JSON {"score": 0-100, "pass": true|false (false when any story, fact
 score < 80), "issues": [{"scene": n or null, "area": "story | scenes | continuity | facts | puzzle | prompts",
 "problem": "...", "fix": "..."}], "strengths": ["..."]}"""
 
-REVISE = """A review found these problems in your plan. Return the COMPLETE corrected plan JSON (same schema, every
-scene with every field), fixing every problem and keeping everything that was right:
+# A fix returns only what changes: rewriting a whole 15-scene plan (15-20k tokens, 2-4 minutes) to fix two scenes
+# was most of the wait before the plan was shown.
+REVISE_PATCH = """A review found these problems in your plan. Fix them by returning ONLY what changes, as JSON:
+{"scenes": [each scene you change, COMPLETE with every one of its fields and its "n"],
+ ...any top-level field you change (e.g. "fact_notes", "bible", "host", "palette", "takeaway") with its whole new
+ value}.
+Leave out every scene and every field that stays the same. Only when a problem needs scenes added, removed or
+reordered, return "scenes_all": [every scene, in order] instead of "scenes".
+Fix every problem and keep everything that was right:
 {ISSUES}"""
 
 SCENE_REGEN = """Rewrite ONE scene of an approved film plan. Keep the film's bible, style and every other scene

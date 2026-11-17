@@ -63,3 +63,32 @@ def test_compare_apps_reports_confirmed_to_unverified_downgrade():
     apps = registry.apps()
     ch = fallback.compare_apps(apps["storyboard-studio"], apps["normal-video-generator"], ["video.text_to_video"])
     assert any("confirmed for Storyboard Studio but not yet" in c for c in ch)
+
+
+def _direct_run(app_id, request):
+    """A written film (story_intel/direct.py): no brief, the approved story's request on the handoff."""
+    return {"mode": "auto", "assets": {}, "prompt": "an explainer", "plan": {"steps": [
+                {**step("s1", app_id, ["video.text_to_video"], [("prompt", "text")], subtasks=["t_generate"]),
+                 "handoff": {"app_id": app_id, "prompt": "an explainer", "request": request}}]},
+            "understanding": {"direct": True, "constraints": {"duration_s": 30, "aspect_ratio": "9:16"},
+                              "subtasks": [{"id": "t_generate", "required_capabilities": ["video.text_to_video"]}]}}
+
+
+def test_retarget_keeps_the_approved_length_and_format():
+    run = _direct_run("normal-video-generator", {"prompt": "an explainer", "duration": 30, "total_duration": 30,
+                                                 "duration_given": True, "aspect_ratio": "9:16"})
+    tstep = run["plan"]["steps"][0]
+    old = tstep["handoff"]
+    tstep["app_id"] = "storyboard-studio"
+    req = fallback.retarget(run, tstep, old)["request"]
+    assert req["duration"] == req["total_duration"] == 30 and req["duration_given"] is True
+    assert req["aspect_ratio"] == "9:16" and req["prompt"] == "an explainer"
+
+
+def test_retarget_without_a_handoff_uses_the_plans_length():
+    run = _direct_run("storyboard-studio", {})
+    tstep = run["plan"]["steps"][0]
+    new = fallback.retarget(run, tstep, None)
+    assert new["app_id"] == "storyboard-studio"
+    assert new["request"]["duration"] == new["request"]["total_duration"] == 30
+    assert new["request"]["duration_given"] is True

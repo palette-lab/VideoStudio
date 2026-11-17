@@ -488,7 +488,7 @@
 /* the finish a film gets, shown on the plan */
 .vr-finish { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
 .vr-finish .vr-chip svg { width: 11px; height: 11px; }
-.vr-finish.full .vr-chip { color: var(--ink); }
+.vr-finish.full .vr-chip, .vr-finish.documentary .vr-chip { color: var(--ink); }
 
 /* real results while the film renders */
 .vr-screen-live { position: absolute; inset: 0; background: #000; }
@@ -582,3 +582,24 @@
   .vr-nav-end .vr-cta { padding: 9px 12px; }
 }
 .vr-art { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin-bottom: 8px; }
+
+/* ---------------------------------------------------------------- editable text layer (textEditor.tsx) */
+.vr-tl { display: grid; gap: 10px; width: 100%; }
+.vr-tl-wrap { position: relative; margin: 0 auto; border-radius: 16px; overflow: hidden; background: #000; }
+.vr-tl-wrap > video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; display: block; }
+.vr-tl-wrap > .vr-loading { position: absolute; inset: 0; color: #ddd; }
+.vr-tl-layer { z-index: 2; }
+.vr-tl-item { pointer-events: auto; cursor: text; outline: none; border-radius: 6px; }
+.vr-tl-item:not(.on):hover { outline: 2px dashed rgba(255, 255, 255, .7); outline-offset: 4px; }
+.vr-tl-item.on { outline: 2px solid var(--accent); outline-offset: 4px; cursor: text; caret-color: var(--accent); }
+.vr-tl-handle { position: absolute; left: -0.9em; top: -0.9em; font-size: 18px; width: 26px; height: 26px; line-height: 26px;
+  border-radius: 50%; background: var(--accent); color: #fff; text-shadow: none; cursor: grab; user-select: none;
+  font-weight: 700; letter-spacing: 0; }
+.vr-tl-bar, .vr-tl-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.vr-tl-bar { padding: 8px 10px; border-radius: 14px; background: var(--glass-strong); border: 1px solid var(--glass-line); }
+.vr-tl-actions > .vr-muted { margin-right: auto; }
+.vr-tl-swatches { display: inline-flex; align-items: center; gap: 4px; }
+.vr-tl-swatches button { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--glass-line); padding: 0; }
+.vr-tl-swatches button.on { border-color: var(--accent); }
+.vr-tl-swatches input { width: 26px; height: 24px; padding: 0; border: 0; background: none; }
+.vr-tl-time { font-family: var(--mono); font-size: 12px; color: var(--muted); }

@@ -6,7 +6,7 @@ from pathlib import Path
 from router_core import config, registry
 from router_core.execution import RunDeleted
 
-from . import effects_engine, genres, motion_engine, music, presenter_engine, story_engine
+from . import effects_engine, explainroo_engine, genres, motion_engine, music, presenter_engine, story_engine
 
 GENERATE_PREFIXES = ("story.", "video.", "fashion.")
 # Edits this adapter really performs on existing footage (anything else fails honestly instead of a fake success).
@@ -14,6 +14,13 @@ EDIT_DONE = {"edit.assemble_clips", "edit.reformat_aspect", "edit.captions_subti
 EDIT_NAMES = {"edit.trim_and_cut": "trim or cut", "edit.audio_mix": "mix audio without an uploaded audio track",
               "edit.transitions": "add transitions", "edit.enhance_quality": "enhance quality",
               "edit.color_grade": "colour-grade", "edit.explainer_effects": "add explainer effects"}
+
+
+def _editable(out: dict) -> dict:
+    """The clean (text-free) video and its editable text layer, when the engine made the words a layer."""
+    if not out.get("text_layer") or not out.get("clean"):
+        return {}
+    return {"text_layer": out["text_layer"], "clean_path": out["clean"]}
 
 
 async def _quiet(msg: str) -> None:
@@ -29,6 +36,21 @@ class EngineAdapter:
         work = config.STORAGE / "renders" / request_id
         prog = progress or _quiet
         try:
+            if app["app_id"] == explainroo_engine.APP_ID:  # uploaded documents -> an explainroo explainer
+                t0 = time.time()
+                out = await explainroo_engine.run(app, step.get("handoff") or {"prompt": "", "request": {}},
+                                                  explainroo_engine.documents_of(run or {}), work, prog)
+                a = out["analysis"]
+                return {"status": "succeeded", "mock": False,
+                        "message": (f"{app['name']} made “{out['title'] or 'the explainer'}” from your document: "
+                                    f"{len(a.get('outline') or [])} scenes, {len(a.get('facts') or [])} facts, the "
+                                    f"{a.get('theme')} look, in {time.time() - t0:.0f} s. Verify: {out['verify'] or 'n/a'}."
+                                    + (f" Check notes left: {len(out['check'])}." if out["check"] else "")),
+                        "outputs": [{"format": "video_file", "ref": f"file://{out['path']}", "path": out["path"],
+                                     "duration_s": out["duration_s"], "title": out["title"],
+                                     "story": a.get("angle") or "", "genre": "Document explainer",
+                                     "subtitles_path": out.get("subtitles"), "chapters_path": out.get("chapters"),
+                                     "cover_path": out.get("cover"), "script": out.get("script") or ""}]}
             if app["app_id"] == "palette-effects-studio":
                 videos = [i for i in inputs if i["format"] == "video_file"]
                 if not videos or any(not i.get("path") for i in videos):
@@ -47,8 +69,11 @@ class EngineAdapter:
                 assets = {aid: {**a, "summary": ((run or {}).get("perception", {}).get(aid) or {}).get("summary", "")}
                           for aid, a in ((run or {}).get("assets") or {}).items()}
                 t0 = time.time()
+                research = (((run or {}).get("story_intel") or {}).get("research")
+                            or (run or {}).get("story_research"))  # the cinematic-skill research, when there was any
                 out = await presenter_engine.run(app, {**(step.get("handoff") or {"prompt": "", "request": {}}),
-                                                       "effects": "palette-effects-studio" not in _later_apps(run, step)},
+                                                       "effects": "palette-effects-studio" not in _later_apps(run, step),
+                                                       **({"_research": research} if research else {})},
                                                  assets, work, prog)
                 return {"status": "succeeded", "mock": False,
                         "message": (f"{app['name']} made the {out['format_label']} “{out['title'] or 'video'}”: "
@@ -61,7 +86,7 @@ class EngineAdapter:
                                      "duration_s": out["duration_s"], "title": out["title"],
                                      "story": " ".join(out["script"])[:600] if out["script"] else "",
                                      "genre": out["format_label"], "presenter_url": out["presenter_url"],
-                                     "script": out["script"]}]}
+                                     "script": out["script"], **_editable(out)}]}
             if app["app_id"] == "palette-motion-studio":
                 base = None
                 if "motion.overlay_graphics" in caps:
@@ -137,6 +162,8 @@ class EngineAdapter:
                                    + (f" Story method: {out['plan']['method']['label']}." if out["plan"].get("method") else "")
                                    + (f" Music: {out['plan']['music_prompt'].split(', instrumental only')[0][:90]}."
                                       if out["plan"].get("music_added") else "")
+                                   + (f" Archive photos: {out['credits'].count(chr(10) + '- ')} from Wikimedia Commons "
+                                      "(credits attached)." if out.get("credits") else "")
                                    + _finish_note(out),
                         "outputs": [{"format": "video_file", "ref": f"file://{out['path']}", "path": out["path"],
                                      "duration_s": out["duration_s"], "scenes": out["scenes"],
@@ -147,7 +174,9 @@ class EngineAdapter:
                                      "graphics_error": (out.get("graphics") or {}).get("error"),
                                      "graphics_note": (("No graphics: " if (out.get("graphics") or {}).get("skipped")
                                                         else "Graphics added: ") + (out.get("graphics") or {}).get("why", ""))
-                                                       if (out.get("graphics") or {}).get("why") else ""}]}
+                                                       if (out.get("graphics") or {}).get("why") else "",
+                                     "credits": out.get("credits") or "",
+                                     **_editable(out)}]}
             # Editing step (the user's own footage, or clips an earlier step made): only what really runs here.
             videos = [i for i in inputs if i["format"] == "video_file"]
             if not videos or any(not i.get("path") for i in videos):
@@ -187,7 +216,7 @@ class EngineAdapter:
         except RunDeleted:
             raise
         except (story_engine.EngineError, motion_engine.MotionError, effects_engine.EffectsError,
-                presenter_engine.PresenterError) as e:
+                presenter_engine.PresenterError, explainroo_engine.ExplainerError) as e:
             return {"status": "failed", "mock": False, "message": f"{app['name']}: {e}"}
         except Exception as e:  # a provider error is a failure, never a success
             return {"status": "failed", "mock": False, "message": f"{app['name']} failed: {type(e).__name__}: {str(e)[:400]}"}

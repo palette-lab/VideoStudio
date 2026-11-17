@@ -83,10 +83,17 @@ scene-by-scene plan, given after the brief. Render it, do not rewrite it:
 - Voice: "narration" with its line as "script" when the approved audio type is narration; "on_camera" with the line
   in "sound" for dialogue; "none" otherwise. "sound" also carries the approved sfx.
 - Full 3D motion graphics plans (scenes with a "keyframe_prompt"): "image_prompt" = that keyframe prompt word for
-  word (the 3D environment, the hero, materials, lights, the locked palette) INCLUDING its quoted "in_scene_text" as
-  dimensional 3D letters - spelled exactly, no other letters, words or numbers anywhere. Those words are NOT repeated
-  as edit_direction graphic_moments (no flat text overlay on a full-3D scene); edit_direction.design uses the
-  palette's HEX colours. "action" keeps the 3D letters rigid and readable for the whole clip."""
+  word (the 3D environment, the hero, materials, lights, the locked palette) with NO letters, words, numbers or logos
+  anywhere - each scene's "overlay_text" is added afterwards as an editable text layer on top of the film, so keep
+  the space it needs clear. edit_direction.design uses the palette's HEX colours.
+- Cinematic documentary plans (mode "cinematic documentary"): every scene is one camera move across the SAME
+  designed world (the look and board in the bible); "image_prompt" frames the scene's "hero" lit by a spotlight with
+  the rest of the board dimmed, and "action" animates its "items" (pop on, tear in, slam, draw on, roll up, string
+  pulling taut) with the hit on "hit_word"; no letters, numbers or readable words anywhere (documents show grey
+  rows, stamps and labels are blank shapes) - the "overlay_text" is added afterwards as an editable text layer.
+  A real person is never given a generated face: only the uploaded photo, hands, tools, silhouette or back view.
+  Scenes marked "host": true are the presenter talking to camera (the engine films and lip-syncs them itself):
+  keep them in order with voice "on_camera" and their line in "sound"; the board scenes are "narration"."""
 
 
 USE_WORDS = re.compile(r"\b(how to (use|apply)|appl(y|ies|ying|ication)|demonstrat\w*|tutorial|routine|"

@@ -53,9 +53,12 @@ def compile_brief(brief: Brief, assets: dict, presenter_mode: bool = False) -> d
         add("story.reference_shot_breakdown", "reference", "recreate the structure and timing of a reference video",
             "detected_intent / asset_roles.motion_reference")
 
-    # A talking head can't show an unboxing, close-ups or the product in use: when the request needs several scenes
-    # it is a storyboarded film (the creator kept consistent), unless the user picked Presenter Studio themselves.
-    creator_film = creating and "talking_presenter" in types and multi and not presenter_mode
+    # A talking head can't show an unboxing, close-ups or the product in use: when a creator / UGC video needs several
+    # scenes it is a storyboarded film (the creator kept consistent), unless the user picked Presenter Studio. A host
+    # explaining something (explainer, educational, testimonial) stays a talking head even when the analysis split the
+    # talk into "scenes" - Presenter Studio cuts it into parts itself.
+    shows_more = bool(types & {"commercial", "social_short"}) and not (types & {"explainer", "educational"})
+    creator_film = creating and "talking_presenter" in types and multi and shows_more and not presenter_mode
     presenter = creating and "talking_presenter" in types and not creator_film
     if creator_film:
         notes.append("Several scenes are needed (not just someone talking to camera), so it is made as a storyboarded "
@@ -89,6 +92,9 @@ def compile_brief(brief: Brief, assets: dict, presenter_mode: bool = False) -> d
     if prog == ["kinetic_text"] and brief.audio.subtitles == "requested" and intent == "edit_existing":
         prog = []  # subtitles on existing footage are captions, not designed typography
         notes.append("Subtitles are handled as captions, not as animated typography.")
+    if presenter and prog:  # Presenter Studio sets every word itself as an editable text layer (text_layer.py)
+        notes.append("Titles, key words and captions are added by Presenter Studio as editable text.")
+        prog = []
     for el in prog:
         add(PROGRAMMATIC_CAPS[el], "motion", f"precise programmatic {el.replace('_', ' ')}", "motion.programmatic_elements")
     has_footage = realistic or bool(footage)
@@ -114,8 +120,9 @@ def compile_brief(brief: Brief, assets: dict, presenter_mode: bool = False) -> d
                 notes.append(f"'{op}' is handled inside the production itself (no separate clips to join).")
     if brief.audio.subtitles == "requested" and "captions" not in ops:
         ops.append("captions")
-    # A presenter's speech is part of their video; only music or sound effects on top need a mix.
-    mix_keys = ("music", "sound_effects") if presenter else ("voiceover", "music", "sound_effects")
+    # Presenter Studio makes the whole soundtrack itself (the voice, then a music bed ducked under it), so a presenter
+    # video never needs a separate audio-mix step (a later editor step would fail: there is no uploaded track to mix).
+    mix_keys = () if presenter else ("voiceover", "music", "sound_effects")
     if any(getattr(brief.audio, k) == "requested" for k in mix_keys) and "audio_mix" not in ops:
         ops.append("audio_mix")
     if brief.audio.subtitles == "excluded" and "captions" in brief.editing.operations:
@@ -126,7 +133,7 @@ def compile_brief(brief: Brief, assets: dict, presenter_mode: bool = False) -> d
     for op in ops:
         add(EDIT_CAPS[op], "edit", f"{op.replace('_', ' ')} on the footage", "editing.operations / audio")
     # Finishing effects run last, on the finished video: asked for, or automatic for explanation videos.
-    if FINISH_CAP in registry.capabilities() and (reqs or footage) and (
+    if FINISH_CAP in registry.capabilities() and (reqs or footage) and not presenter and (
             wants_effects or types & EXPLAINER_TYPES or creator_film or (creating and types & CREATOR_TYPES)):
         add(FINISH_CAP, "finish", "finishing effects for an explanation video, picked from what is said",
             "editing.operations" if wants_effects else "production_type")

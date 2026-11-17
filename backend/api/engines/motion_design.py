@@ -71,6 +71,9 @@ def finish_level(genre: str | None, prompt: str = "", production_types=(), perso
 
 
 def finish_summary(level: str) -> str:
+    if level == "documentary":  # the cinematic-skill method: type it OR show it, one hero per line, nothing extra
+        return ("Documentary finish: the film's own typed words (dates, names, places, stamps, numbers) timed to each "
+                "scene, plus captions, as an editable text layer; no punch-ins, pop words or callouts over the picture.")
     return ("Effects and motion design: creator effects (punch-ins, pop words, highlights) plus a hook, callouts, "
             "labels and an end card, timed to what is said and shown." if level == "full" else
             "Clean finish: narration, a typographic hook and a few title words; no callouts or effects over the picture.")

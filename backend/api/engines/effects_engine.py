@@ -134,6 +134,8 @@ REQUIRED_TEXT = {"backdrop-word", "spotlight", "huge-strike", "crayon-write", "l
                  "reject-stamp", "pause-point", "select-resize", "comment-box", "pop-word", "logo-link", "lineup",
                  "red-collage", "cover-star", "shortcut-rain", "uninstall", "reel-frame", "match-cut", "headline-wall",
                  "card-drop"}
+# Effects that draw no letters: the only ones used when the words live in the editable text layer (text_layer.py).
+NO_TEXT_FX = ("moody", "slow-push", "lean-in", "dot-reveal", "swipe", "rabbit-hole")
 PRODUCT_WORDS = ("product", "device", "phone", "smartphone", "iphone", "galaxy", "pixel", "laptop", "macbook", "tablet",
                  "ipad", "watch", "smartwatch", "earbuds", "headphones", "airpods", "speaker", "camera", "gadget", "app",
                  "software", "tool", "launch", "unbox", "review", "feature", "specs", "battery", "chip", "gaming",
@@ -405,23 +407,28 @@ async def run(app: dict, handoff: dict, video: str, work: Path, progress) -> dic
     if dur < 2:
         raise EffectsError("The video is too short for effects.")
     face, segs = await asyncio.gather(has_face(video, dur), transcript(video, work))
-    want_captions = bool(segs) and handoff.get("captions", True)
+    text_free = bool(handoff.get("text_free"))  # the words go in the editable text layer, not the pixels
+    want_captions = bool(segs) and handoff.get("captions", True) and not text_free
     cap = handoff.get("caption_style") or caption_style(bool(handoff.get("captions_only")))
     if handoff.get("captions_only"):  # a calm film: only captions, no effects
         if not want_captions:
-            return {"path": video, "skipped": True, "why": "no speech to caption", "plan": [], "captions": None}
+            return {"path": video, "skipped": True, "why": "no speech to caption", "plan": [], "captions": None,
+                    "transcript": segs}
         await progress(f"{app['name']}: adding {cap} captions")
         out_path = await _render([captions_entry(cap, [])], video, work)
         from . import approaches
         approaches.remember("captions", cap)
         return {"path": str(out_path), "duration_s": round(await _duration(str(out_path)), 2), "plan": [],
-                "captions": cap, "face": face, "speech": True, "revised": False, "advanced": False}
-    advanced = product_talk(face, handoff.get("prompt") or "", segs)
+                "captions": cap, "face": face, "speech": True, "revised": False, "advanced": False,
+                "transcript": segs}
+    advanced = product_talk(face, handoff.get("prompt") or "", segs) and not text_free
     count = ("3-4" if dur <= 15 else "4-5" if dur <= 40 else "5-7") if advanced else \
         ("2-3" if dur <= 15 else "3-4" if dur <= 40 else "4-6")
+    if text_free:  # only camera moves and grades: a few well-placed ones
+        count = "1-2" if dur <= 20 else "2-4"
     usable = [k for k, v in CATALOG.items() if (face or not v[2]) and (segs or k != "halftone-paper")
-              and (advanced or k != "logo-link")]
-    todays = pick_set(usable)  # a different set every film, so the effects vary from video to video
+              and (advanced or k != "logo-link") and (not text_free or k in NO_TEXT_FX)]
+    todays = usable if text_free else pick_set(usable)  # a different set every film, so the effects vary from video to video
     catalog = "\n".join(f"  - {k}: {CATALOG[k][0]}; options: {CATALOG[k][1]}"
                         + (f"; or {LOOKS[k]}" if k in LOOKS else "") for k in todays)
     product = PRODUCT_RULES.replace("{MIN_ADV}", "2" if dur <= 15 else "3").replace(
@@ -444,8 +451,8 @@ async def run(app: dict, handoff: dict, video: str, work: Path, progress) -> dic
                                reasoning_effort=effort, stage="engine.effects.plan")
     plan = clean_plan(data, dur, face, todays)
     if not plan and not want_captions:
-        if handoff.get("allow_none"):  # the editor decided this video is better without effects
-            return {"path": video, "skipped": True, "why": str(data.get("why") or ""), "plan": []}
+        if handoff.get("allow_none") or text_free:  # the editor decided this video is better without effects
+            return {"path": video, "skipped": True, "why": str(data.get("why") or ""), "plan": [], "transcript": segs}
         raise EffectsError("No usable effects were planned for this video.")
     caps = [captions_entry(cap, data.get("caption_keywords"))] if want_captions else []
     await progress(f"{app['name']}: checking {len(plan)} effects on still frames")
@@ -470,4 +477,4 @@ async def run(app: dict, handoff: dict, video: str, work: Path, progress) -> dic
         approaches.remember("captions", cap)
     return {"path": str(out_path), "duration_s": round(await _duration(str(out_path)), 2), "plan": plan,
             "captions": cap if caps else None,
-            "face": face, "speech": bool(segs), "revised": bool(problems), "advanced": advanced}
+            "face": face, "speech": bool(segs), "revised": bool(problems), "advanced": advanced, "transcript": segs}

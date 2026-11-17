@@ -29,7 +29,7 @@ from pathlib import Path
 
 from router_core import config, llm
 
-from . import effects_engine, finishing, genres, music, story_engine
+from . import genres, music, story_engine, text_layer
 from .vendor.flow import fal_helper, video_merge
 
 log = logging.getLogger("palette_video.presenter")
@@ -133,7 +133,12 @@ Rules:
   modest and honest.
 - When a photo of the presenter is given, describe that person as they look; never name or identify a real person.
 - When the brief names a real person or celebrity as the presenter, cast a fictional look-alike-free presenter instead.
-- If the user provides their own audio, return an empty "segments" list (their recording is the speech)."""
+- If the user provides their own audio, return an empty "segments" list (their recording is the speech).
+- When "research" is given (a documentary maker's research, with sources), every fact the presenter states comes
+  from it: numbers, dates, names and quotes exactly as researched; "about" or "reported" where its confidence is not
+  "verified"; nothing from "conflicts" stated as certain; never an invented quote, number or date. Open on the most
+  interesting fact or question (its "angle"), one idea per sentence, the key word last, numbers spelled as said.
+  Add "fact_notes": [{"claim": "...", "source": "..."}] for every fact you used."""
 
 
 class PresenterError(RuntimeError):
@@ -192,6 +197,9 @@ async def write_script(handoff: dict, fmt: str, total: int, refs: list[dict], ow
         "uploaded_images": [{"role": r["role"], "what_it_shows": r["summary"]} for r in refs],
         "user_provides_own_audio": own_audio,
     }
+    res = handoff.get("_research") or {}
+    if res.get("facts") or res.get("timeline"):  # the cinematic-skill research: the only facts the host may state
+        user["research"] = {k: res.get(k) for k in ("summary", "angle", "timeline", "facts", "conflicts", "note")}
     data = await llm.chat_json(config.REASONING_MODEL, [{"role": "system", "content": SCRIPT_SYSTEM},
                                                         {"role": "user", "content": json.dumps(user, ensure_ascii=False)}],
                                max_tokens=8000, stage="engine.presenter.script")
@@ -205,8 +213,8 @@ async def write_script(handoff: dict, fmt: str, total: int, refs: list[dict], ow
     return data
 
 
-def _presenter_prompt(script: dict, fmt: str, with_person_ref: bool, with_product: bool) -> str:
-    f = FORMATS[fmt]
+def _presenter_prompt(script: dict, fmt: str | dict, with_person_ref: bool, with_product: bool) -> str:
+    f = fmt if isinstance(fmt, dict) else FORMATS[fmt]
     who = ("the person in the reference photo, keeping their face, hair, skin tone and build exactly"
            if with_person_ref else
            f"a fictional person (not a celebrity, not any real or named person): {script.get('presenter') or 'a friendly adult presenter'}")
@@ -431,6 +439,50 @@ def fit_clip(ff: str, clip: str, audio: str, out: str, w: int, h: int, punch_in:
           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", out], "Syncing a chunk")
 
 
+DOC_HOST = {  # a documentary's host: standing in a dim archive room, the film's board softly behind them
+    "label": "Documentary host", "default_s": 10, "effects": "documentary",
+    "look": "medium close-up of a documentary host standing in a dim archive room, the film's evidence board of "
+            "pinned photos and maps softly out of focus behind them, warm key light from one side, eye-level camera, "
+            "50mm, shallow depth of field",
+    "style": "", "motion": "talking calmly and seriously to the camera like a documentary presenter, subtle head "
+                           "movement, natural blinking, an occasional small hand gesture, steady locked-off camera",
+}
+
+
+async def host_clips(app: dict, host: dict, lines: list[str], ar: str, work: Path, progress,
+                     language: str = "english") -> list[str]:
+    """A documentary's on-camera host: ONE fictional presenter (one photo, one base clip) saying each line, every
+    line its own lip-synced clip at the film's size with its own speech. Returns the clip paths, in line order."""
+    key, q, ff = story_engine.fal_key(), quality(), _ffmpeg()
+    work.mkdir(parents=True, exist_ok=True)
+    gender = "male" if str(host.get("voice_gender")).lower() == "male" else "female"
+    look = {**DOC_HOST, "look": f"{DOC_HOST['look']}. {host.get('setting') or ''}".strip()}
+    script = {"presenter": host.get("look") or "a calm, credible adult documentary presenter",
+              "setting": host.get("setting") or ""}
+    image = await presenter_image(app, script, look, ar, [], [], key, progress)
+    if not str(image).startswith("http"):
+        image = await story_engine._upload(image)
+    voices: list[str] = []
+    await progress(f"{app['name']}: recording the host ({len(lines)} line{'s' if len(lines) > 1 else ''})")
+    speech = [await speak(t, gender, language, key, work / f"host_line_{i + 1:02d}", voices) for i, t in enumerate(lines)]
+    base = await base_clip(app, image, base_prompt(look, script["setting"]), ar, q, key, work, progress)
+    base_s = await asyncio.to_thread(video_merge.probe_duration, ff, base)
+    w, h = video_merge.dimensions_for(ar, "1080p" if q["resolution"] == "1080p" else "720p")
+
+    async def one(i: int, audio: str) -> str:
+        dur = await asyncio.to_thread(video_merge.probe_duration, ff, audio)
+        speech_in = await asyncio.to_thread(pad_speech, ff, audio, dur, str(work / f"host_in_{i + 1:02d}.wav"))
+        clip_in = await asyncio.to_thread(window, ff, base, base_s, i, max(dur, CHUNK_MIN_S),
+                                          str(work / f"host_base_{i + 1:02d}.mp4"))
+        await progress(f"{app['name']}: lip-syncing the host, line {i + 1}")
+        talk, _ = await lipsync(clip_in, speech_in, q, key, work / f"host_talk_{i + 1:02d}.mp4")
+        out = str(work / f"host_{i + 1:02d}.mp4")
+        await asyncio.to_thread(fit_clip, ff, talk, audio, out, w, h, False)
+        return out
+
+    return list(await asyncio.gather(*(one(i, a) for i, a in enumerate(speech))))
+
+
 async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> dict:
     """Make the talking video. Returns {"path", "duration_s", "title", "format", "script", "presenter_url", "chunks"}."""
     key = story_engine.fal_key()
@@ -548,41 +600,22 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
     # Music under the presenter (no prompt needed): low while they talk, back up in every pause.
     final, music_prompt = await music.add_to(final, handoff.get("prompt") or "", f["effects"], True,
                                              work / "music", progress, app["name"])
-    effects = None
-    # A person talking to camera always gets effects and motion design (motion_design.finish_level).
+    # Every word on screen stays editable: camera-move effects only, the graphics director's hook / callouts / end
+    # card and the captions go in the text layer, rendered once on the clean video (text_layer.finish).
     style = story_engine.EFFECT_STYLE.get(f["effects"]) or story_engine.EFFECT_STYLE["ugc_ad"]
-    if handoff.get("effects", True) and effects_engine.available() is None:
-        try:
-            effects = await effects_engine.run({**app, "name": f"{app['name']} effects"},
-                                               {"prompt": handoff.get("prompt") or "", "effects_style": style,
-                                                "allow_none": False}, final, work / "effects", progress)
-            if not effects.get("skipped"):
-                final = effects["path"]
-        except Exception as e:  # effects are a finishing touch
-            log.warning("presenter effects failed: %s", e)
-            effects = {"error": str(e)[:300], "plan": []}
-
-    # Motion design after the effects, decided from the finished video: the graphics director looks at it and adds
-    # product callouts, device diagrams or kinetic type only when they help (it returns "no graphics" otherwise).
-    graphics = None
-    if q.get("graphics", True) and handoff.get("graphics", True):
-        genre = f["effects"] if f["effects"] in genres.GENRES else genres.detect(handoff.get("prompt") or "")
-        lines = [s["text"] for s in script["segments"]] if not own_audio else []
-        film = {"title": script.get("title") or "", "story": handoff.get("prompt") or "", "genre": genre,
-                "genre_label": f["label"],
-                "scenes": [{"title": f"Part {i + 1}", "beat": lines[i] if i < len(lines) else "",
-                            "action": "the presenter talks to camera"} for i in range(len(fitted))]}
-        busy = [(float(e["start"]), float(e["end"]), e["fx"]) for e in (effects or {}).get("plan") or []]
-        try:
-            graphics = await finishing.run(app, handoff.get("prompt") or "", film, final, fitted, lines, ar,
-                                           work / "graphics", progress, q, busy=busy, level="full",
-                                           captions=(effects or {}).get("captions"))
-            final = graphics["path"]
-        except Exception as e:  # graphics are a finishing touch: the talking video is still delivered
-            log.warning("presenter graphics failed: %s", e)
-            await progress(f"{app['name']}: motion graphics could not be added ({str(e)[:160]}); delivering without them")
-            graphics = {"error": str(e)[:300]}
-    return {"path": final, "graphics": graphics, "duration_s": round(await asyncio.to_thread(video_merge.probe_duration, ff, final), 2),
+    genre = f["effects"] if f["effects"] in genres.GENRES else genres.detect(handoff.get("prompt") or "")
+    lines = [s["text"] for s in script["segments"]] if not own_audio else []
+    film = {"title": script.get("title") or "", "story": handoff.get("prompt") or "", "genre": genre,
+            "genre_label": f["label"],
+            "scenes": [{"title": f"Part {i + 1}", "beat": lines[i] if i < len(lines) else "",
+                        "action": "the presenter talks to camera"} for i in range(len(fitted))]}
+    finished = await text_layer.finish(app, handoff.get("prompt") or "", film, final, fitted, lines, ar,
+                                       work / "finish", progress, effects_style=style, level="full",
+                                       do_effects=handoff.get("effects", True),
+                                       do_graphics=q.get("graphics", True) and handoff.get("graphics", True))
+    final, clean = finished["path"], finished["clean"]
+    effects, graphics = finished["effects"], finished["graphics"]
+    return {"path": final, "clean": clean, "text_layer": finished["text_layer"], "graphics": graphics, "duration_s": round(await asyncio.to_thread(video_merge.probe_duration, ff, final), 2),
             "title": script.get("title") or "", "format": fmt, "format_label": f["label"],
             "script": [s["text"] for s in script["segments"]] if not own_audio else [],
             "presenter_url": image_url, "generated_presenter": not (people and not products),

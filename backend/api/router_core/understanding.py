@@ -43,7 +43,8 @@ How to think:
   (a YouTube-style explainer with a host, a UGC/creator ad where someone talks about a product, a testimonial, a
   spokesperson, an avatar or lip-sync video, or a photo of a person made to say a script or the uploaded audio). A
   narrator over footage is NOT talking_presenter. Add it next to the other types that fit (e.g. ["talking_presenter",
-  "explainer"]). An uploaded photo of the presenter is role "character"; an uploaded recording they should say is
+  "explainer"]). A host explaining something at a desk or in one place is ONE continuous talking-head shot
+  (shot_structure "single_continuous"), even when the talk covers several points or examples - never multi_scene. An uploaded photo of the presenter is role "character"; an uploaded recording they should say is
   role "audio_track" with use "audio_source". A UGC/creator video that must SHOW things beyond a talking head
   (unboxing, product close-ups, using/wearing/carrying the product, several locations) is a multi-scene film: set
   shot_structure "multi_scene", motion.kinds ["realistic"], production_type ["social_short", "commercial"] (also

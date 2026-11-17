@@ -30,10 +30,39 @@ async def test_ugc_ad_with_a_talking_creator_goes_to_presenter_studio():
     assert res["status"] == "awaiting_approval" and apps == ["palette-presenter-studio"]
 
 
-async def test_youtube_explainer_with_a_host_gets_finishing_effects():
+async def test_youtube_explainer_with_a_host_is_presenter_studio_alone():
+    # Presenter Studio finishes the video itself (camera-move effects + every word as editable text): no later app
+    # may burn text into it.
     res, apps = await plan({"detected_intent": "create_new", "confidence": 0.9,
                             "production_type": ["talking_presenter", "explainer"], "motion": {"kinds": ["realistic"]}})
-    assert apps == ["palette-presenter-studio", "palette-effects-studio"]
+    assert apps == ["palette-presenter-studio"]
+    res, apps = await plan({"detected_intent": "create_new", "confidence": 0.9,
+                            "production_type": ["talking_presenter", "explainer"],
+                            "motion": {"kinds": ["realistic"], "programmatic_elements": ["kinetic_text", "data_visualization"]}})
+    assert apps == ["palette-presenter-studio"]
+
+
+async def test_a_host_explainer_split_into_scenes_still_goes_to_presenter_studio():
+    # What the analysis really returned for "a friendly host at a desk explains compound interest": it split the
+    # talk into 5 "scenes". A host explaining stays one talking head, not a storyboarded film.
+    res, apps = await plan({"detected_intent": "create_new", "confidence": 0.9,
+                            "production_type": ["talking_presenter", "explainer", "educational"],
+                            "scene": {"shot_structure": "multi_scene", "scene_count": 5,
+                                      "consistency": ["the host's identity", "the desk setup"]},
+                            "motion": {"kinds": ["realistic"]}})
+    assert res["status"] == "awaiting_approval" and apps[0] == "palette-presenter-studio"
+    assert not {"pltt-storyboard-video-maker", "pltt-flow-video-2"} & set(apps)
+
+
+async def test_a_presenter_with_music_needs_no_separate_audio_mix_step():
+    # The failed run: Presenter -> Motion Studio -> Flow Video "mix audio" -> Effects; the mix step had no track.
+    res, apps = await plan({"detected_intent": "create_new", "confidence": 0.9,
+                            "production_type": ["talking_presenter", "explainer", "educational"],
+                            "audio": {"music": "requested", "voiceover": "requested", "sound_effects": "requested"},
+                            "motion": {"kinds": ["realistic"]}})
+    caps = {r["capability"] for r in res["understanding"]["requirements"]}
+    assert apps[0] == "palette-presenter-studio" and "edit.audio_mix" not in caps
+    assert "pltt-flow-video-2" not in apps
 
 
 async def test_presenter_mode_makes_any_request_a_talking_presenter():
@@ -206,3 +235,19 @@ async def test_composer_length_and_format_win_over_the_prompt():
                                  chat=FakeLLM(brief), settings={"duration_s": 20, "aspect_ratio": "9:16"})
     req = res["plan"]["steps"][0]["handoff"]["request"]
     assert req["duration"] == 20 and req["aspect_ratio"] == "9:16"
+
+
+def test_script_is_written_from_the_cinematic_research(monkeypatch):
+    import asyncio
+    sent = {}
+
+    async def fake_chat(model, messages, **kw):
+        sent["system"], sent["user"] = messages[0]["content"], messages[1]["content"]
+        return {"segments": [{"text": "Your money earns money on its money.", "mood": "curious"}]}
+    monkeypatch.setattr(pe.llm, "chat_json", fake_chat)
+    research = {"angle": "interest on interest", "facts": [{"claim": "interest is added to the principal",
+                                                            "source": "Compound interest", "confidence": "verified"}]}
+    out = asyncio.run(pe.write_script({"prompt": "explain compound interest", "_research": research},
+                                      "youtube_explainer", 20, [], False))
+    assert out["segments"] and '"research"' in sent["user"] and "interest is added to the principal" in sent["user"]
+    assert "every fact the presenter states comes" in sent["system"]

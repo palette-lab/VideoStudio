@@ -37,6 +37,9 @@
       "v3b.fal.media",
       "storage.googleapis.com",
       "en.wikipedia.org",
+      "commons.wikimedia.org",
+      "upload.wikimedia.org",
+      "thumb.wikimedia.org",
       "huggingface.co"
     ],
     "background_jobs": true

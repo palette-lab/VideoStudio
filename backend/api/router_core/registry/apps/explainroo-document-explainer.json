@@ -1,0 +1,84 @@
+{
+  "app_id": "explainroo-document-explainer",
+  "name": "Document Explainer",
+  "description": "Turns uploaded documents (PDF, Word, TXT, Markdown) into a narrated explainer video: the Palette LLM reads and analyses them, writes the narration and the drawings, and explainroo renders them on this computer (Kokoro voice, Whisper word timing, Chrome drawing, ffmpeg) with music, subtitles, chapters and a cover.",
+  "status": "available",
+  "verified": false,
+  "execution": {
+    "adapter": "engine",
+    "service_target": "engines/explainroo_engine.py (explainroo 0.6.0, MIT, run with npx)"
+  },
+  "source": {
+    "repo": "vincentsch/explainroo",
+    "license": "MIT",
+    "version": "0.6.0",
+    "runtime": "npx explainroo@0.6.0"
+  },
+  "capabilities": [
+    "explainer.from_document"
+  ],
+  "capability_status": {
+    "explainer.from_document": "confirmed",
+    "video.text_to_video": "unknown",
+    "story.character_consistency": "unknown"
+  },
+  "input_modalities": [
+    "text",
+    "document"
+  ],
+  "input_modalities_status": "confirmed",
+  "capability_requirements": {},
+  "accepts_handoff": [],
+  "emits": [
+    "video_file"
+  ],
+  "best_for": [
+    "explaining an uploaded PDF, report, paper, manual or notes",
+    "charts of a document's real numbers",
+    "step-by-step diagrams of a process described in a document"
+  ],
+  "not_good_for": [
+    "photoreal people, places or live action (use Flow Video or Storyboard & Video)",
+    "editing the user's own footage"
+  ],
+  "fallback_apps": [],
+  "profile": {
+    "shot_structures": {
+      "value": [
+        "multi_scene"
+      ],
+      "status": "confirmed"
+    },
+    "max_duration_s": {
+      "value": 600,
+      "status": "unverified"
+    },
+    "aspect_ratios": {
+      "value": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:5"
+      ],
+      "status": "confirmed"
+    },
+    "motion_styles": {
+      "value": [
+        "programmatic_precise"
+      ],
+      "status": "confirmed"
+    },
+    "accepts_asset_roles": {
+      "value": [],
+      "status": "confirmed"
+    },
+    "audio_output": {
+      "value": [
+        "voiceover",
+        "music"
+      ],
+      "status": "confirmed"
+    }
+  },
+  "profile_notes": "Added 2026-11-17. explainroo 0.6.0 runs locally through npx (Node 20.11+, ffmpeg, Chrome); the first run downloads Kokoro and Whisper (~400 MB). Tested 2026-11-17: an 80 s 1080p explainer rendered in 1 min 41 s at fast quality and passed verify. The LLM-written scenes.js is refused if it uses network, eval or dynamic imports."
+}

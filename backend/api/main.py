@@ -36,6 +36,7 @@ import os
 from engines import adapter as engine_adapter
 from engines import story_intel
 from engines.story_intel import research as story_research
+from engines import explainroo_engine
 from engines.story_intel import direct as story_direct
 from models import Run
 from router_core import config, execution, fallback, llm, perception, pipeline, registry, validator
@@ -47,14 +48,15 @@ router = PluginRouter(tags=["palette-video"])
 
 READ = [require_permission("resources:read")]
 WRITE = [require_permission("resources:write")]
-MODES = {"auto", "normal", "hybrid", "analyze", "storyboard", "flow", "motion", "presenter", "motion3d"}
+MODES = {"auto", "normal", "hybrid", "analyze", "storyboard", "flow", "motion", "presenter", "motion3d", "explainer"}
 BUSY = {"analyzing", "approved", "executing"}
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 EXT_MODALITY = {".jpg": "image", ".jpeg": "image", ".png": "image", ".webp": "image", ".heic": "image",
                 ".mp4": "video", ".mov": "video", ".webm": "video", ".mkv": "video", ".m4v": "video",
                 ".mp3": "audio", ".wav": "audio", ".m4a": "audio", ".aac": "audio", ".ogg": "audio", ".flac": "audio",
-                ".pdf": "document", ".txt": "document", ".md": "document"}
-DOC_TYPES = ("application/pdf", "text/plain", "text/markdown")
+                ".pdf": "document", ".txt": "document", ".md": "document", ".docx": "document"}
+DOC_TYPES = ("application/pdf", "text/plain", "text/markdown",
+             "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 
 def _media(assets: dict) -> dict:
@@ -145,6 +147,8 @@ def _public(run: dict) -> dict:
     for o in outputs:
         o.pop("path", None)
         o.pop("storage", None)
+        o.pop("clean_path", None)
+        o["has_clean"] = bool(o.pop("clean_storage", None))  # the text-free video, for the editable text layer
         o["version"] = len(o.pop("versions", None) or [])  # bumps when a scene is re-rendered
         for sc in o.get("scenes") or []:
             sc.pop("local_clip", None)
@@ -176,6 +180,8 @@ def _mark_finish(run: dict) -> None:
             prompt = (step.get("handoff") or {}).get("prompt") or run.get("prompt") or ""
             level = motion_design.finish_level(genres.detect(prompt, types), prompt, types,
                                                person_talks=aid == presenter_engine.APP_ID or "talking_presenter" in types)
+            if aid in story_engine.ENGINE_APPS and (run.get("story_intel") or {}).get("mode") == "cinematic_doc":
+                level = "documentary"
             step["finish"] = {"level": level, "summary": motion_design.finish_summary(level)}
 
 
@@ -250,7 +256,10 @@ async def analyze_job(ctx: PluginContext, execution_: JobExecution, payload: dic
                     r = {"error": f"Could not analyse this file: {e}"}
                 run["perception"][a["id"]] = r
                 a["tags"] = r.get("tags", [])
-        if "enhanced_prompt" not in run and not run.get("parent_run"):
+        explainer = explainroo_engine.wanted(run)
+        if explainer:  # documents -> Document Explainer: it reads and analyses them itself, no story or enhancer
+            _event(run, f"Document Explainer: {len(explainroo_engine.documents_of(run))} document(s) to explain")
+        if "enhanced_prompt" not in run and not run.get("parent_run") and not explainer:
             run["stage"] = "enhancing"
             _event(run, "Enhancing the prompt")
             await _save(ctx, run)
@@ -274,7 +283,9 @@ async def analyze_job(ctx: PluginContext, execution_: JobExecution, payload: dic
         if planned:  # the user's words first (their intent wins), the enhanced version as the detailed brief
             planned = (f"{run['prompt']}\n\nDetailed version of this request (written from the words above; follow "
                        f"it, but the words above win wherever they differ):\n{planned}")
-        if story_direct.applies(run):  # the film is already written and approved: no second reading
+        if explainer:
+            res = _explainer_result(run)
+        elif story_direct.applies(run):  # the film is already written and approved: no second reading
             res = _direct_result(run)
         else:
             res = await pipeline.analyze(prompt=planned or run["prompt"], mode=run["mode"],
@@ -310,6 +321,26 @@ async def analyze_job(ctx: PluginContext, execution_: JobExecution, payload: dic
     except execution.RunDeleted:
         return {"run_id": run["id"], "status": "deleted"}
     return {"run_id": run["id"], "status": run["status"]}
+
+
+def _explainer_result(run: dict) -> dict:
+    """Uploaded documents -> one Document Explainer step (explainroo), or why it cannot be made."""
+    if not explainroo_engine.documents_of(run):
+        why = ("No readable document: upload a PDF, Word, TXT or Markdown file with text in it "
+               "(a scanned PDF has no text to read).")
+        _event(run, why)
+        return {"understanding": None, "plan": None, "issues": [], "questions": [], "plan_mode": run["mode"],
+                "status": "not_possible", "blocking_reasons": [why]}
+    missing = explainroo_engine.available()
+    d = explainroo_engine.build(run)
+    issues = validator.validate(d["plan"], d["understanding"], run["mode"], _media(run["assets"]))
+    blocking = [i["message"] for i in validator.errors(issues)] + ([f"explainroo cannot run here: {missing}"]
+                                                                    if missing else [])
+    _event(run, "Plan: the Document Explainer explains your document" if not blocking
+           else "The Document Explainer cannot make this video")
+    return {"understanding": d["understanding"], "plan": d["plan"], "issues": issues, "questions": [],
+            "plan_mode": run["mode"], "status": "not_possible" if blocking else "awaiting_approval",
+            "blocking_reasons": blocking}
 
 
 def _direct_result(run: dict) -> dict:
@@ -357,7 +388,68 @@ async def execute_job(ctx: PluginContext, execution_: JobExecution, payload: dic
             if o.get("path") and Path(o["path"]).exists() and not o.get("storage"):
                 o["storage"] = await ctx.storage.upload_file_path(
                     o["path"], "video/mp4", key=f"renders/{run['id']}/{sid}.mp4")
+            await _store_clean(ctx, run["id"], sid, o)
             await _store_scenes(ctx, run["id"], sid, o)
+    await _save(ctx, run)
+    return {"run_id": run["id"], "status": run["status"]}
+
+
+async def _store_clean(ctx: PluginContext, run_id: str, sid: str, o: dict) -> None:
+    """The text-free video under the editable text layer, kept so the words can be re-rendered after edits."""
+    if o.get("clean_path") and Path(o["clean_path"]).exists() and not o.get("clean_storage"):
+        try:
+            o["clean_storage"] = await ctx.storage.upload_file_path(
+                o["clean_path"], "video/mp4", key=f"renders/{run_id}/{sid}-clean.mp4")
+        except Exception as e:
+            log.warning("clean video of %s not stored: %s", run_id, e)
+
+
+async def _clean_video(run: dict, o: dict) -> str:
+    """A local copy of the clean video (the render folder, or app storage)."""
+    if o.get("clean_path") and Path(o["clean_path"]).exists():
+        return o["clean_path"]
+    url = (o.get("clean_storage") or {}).get("file_url") or ""
+    if not url:
+        raise HTTPException(404, "This video has no clean (text-free) version.")
+    return str(_local_file(url) or await _materialize(url, config.STORAGE / "renders" / run["id"] / "clean.mp4"))
+
+
+@job("palette_video.text", timeout_seconds=3600, max_attempts=1)
+async def text_job(ctx: PluginContext, execution_: JobExecution, payload: dict):
+    """The user edited the words: render the text layer on the clean video again (no AI video is made)."""
+    from engines import text_layer
+    _configure(ctx)
+    run = await _load(ctx, payload["run_id"])
+    run["job"] = {"id": execution_.id, "name": "palette_video.text", "started_at": time.time()}
+    sid = payload["step_id"]
+    ex = run["execution"][sid]
+    o = next(o for o in ex["outputs"] if o.get("text_layer"))
+
+    async def progress(msg: str) -> None:
+        ex["message"] = msg
+        _event(run, msg)
+        await _save(ctx, run)
+    try:
+        clean = await _clean_video(run, o)
+        work = config.STORAGE / "renders" / f"{run['id']}-{sid}-text-{int(time.time())}"
+        work.mkdir(parents=True, exist_ok=True)
+        path = await text_layer.burn(clean, o["text_layer"], work, progress, "Text")
+        version = len(o.setdefault("versions", [])) + 1
+        o["versions"].append({"storage": o.get("storage"), "text": True, "at": time.time()})
+        o["path"], o["ref"] = path, f"file://{path}"
+        o["storage"] = await ctx.storage.upload_file_path(path, "video/mp4",
+                                                          key=f"renders/{run['id']}/{sid}-v{version}.mp4")
+        ex["message"] = f"Text updated ({len(o['text_layer']['items'])} texts); the video itself is unchanged."
+        run["report"] = execution.build_report(run)
+        _event(run, ex["message"])
+    except execution.RunDeleted:
+        return {"run_id": run["id"], "status": "deleted"}
+    except Exception as e:
+        log.exception("text render failed for %s", run["id"])
+        ex["message"] = f"The text could not be rendered ({str(e)[:200]}); your edits are saved."
+        _event(run, ex["message"])
+    run["status"] = "completed"
+    run.pop("rerender", None)
     await _save(ctx, run)
     return {"run_id": run["id"], "status": run["status"]}
 
@@ -444,7 +536,8 @@ async def rerender_job(ctx: PluginContext, execution_: JobExecution, payload: di
 # ---------------------------------------------------------------- runs whose job died
 
 _BUSY = ("analyzing", "approved", "executing")
-_JOB_TIMEOUT = {"palette_video.analyze": 1800, "palette_video.execute": 7200, "palette_video.rerender": 3600}
+_JOB_TIMEOUT = {"palette_video.analyze": 1800, "palette_video.execute": 7200, "palette_video.rerender": 3600,
+                "palette_video.text": 3600}
 _JOB_ENDED = ("completed", "failed", "cancelled", "succeeded", "timed_out", "dead")
 
 
@@ -478,9 +571,11 @@ async def _reap(ctx: PluginContext, run: dict) -> dict:
         return run
     why = "The job stopped without finishing (the server was probably restarted)."
     if run.get("rerender"):  # a scene re-render died: the finished film is still there, unchanged
-        scene = run.pop("rerender").get("scene")
+        job_info = run.pop("rerender")
         run["status"] = "completed"
-        _event(run, f"Re-rendering scene {scene} stopped without finishing; the film is unchanged.")
+        _event(run, "Updating the text stopped without finishing; your edits are saved, press Save again."
+               if job_info.get("text") else
+               f"Re-rendering scene {job_info.get('scene')} stopped without finishing; the film is unchanged.")
         try:
             await _save(ctx, run)
         except execution.RunDeleted:
@@ -751,6 +846,10 @@ async def _story_intelligence(ctx: PluginContext, run: dict) -> bool:
         return True
     if not (intel.get("plan") or {}).get("scenes"):
         run["story_classification"] = cls
+        if intel.get("research"):  # a presentation: Presenter Studio writes its script from these sourced facts
+            run["story_research"] = intel["research"]
+            n = len(intel["research"].get("facts") or [])
+            _event(run, f"Research for the presenter's script: {n} sourced fact{'s' if n != 1 else ''}")
         return False
     run["story_intel"] = intel
     from engines import prompt_enhancer as pe
@@ -764,6 +863,8 @@ async def _story_intelligence(ctx: PluginContext, run: dict) -> bool:
     else:
         agent = {"presenter": "presenter", "product": "product", "educational": "explainer"}.get(cls.get("category"), "story")
         label = pe.AGENTS[agent][0]
+        if intel.get("mode") == "cinematic_doc":  # the cinematic-skill method wrote and directed it
+            agent, label = "story", "Cinematic Documentary Director"
     run.update(enhanced_prompt=story_intel.as_brief(intel), agent=agent, agent_label=label,
                agent_why=f"{cls.get('category', '').replace('_', ' ')}: {cls.get('intent') or ''}"[:200])
     v = intel.get("validation") or {}
@@ -878,6 +979,53 @@ async def rerender_scene(run_id: str, n: int, body: Rerender, ctx: PluginContext
     return _public(run)
 
 
+class TextEdit(BaseModel):
+    step_id: str
+    items: list[dict]
+
+
+@router.post("/runs/{run_id}/text", dependencies=WRITE)
+async def save_text(run_id: str, body: TextEdit, ctx: PluginContext = Depends(get_plugin_context)):
+    """Save the user's edited words and render them onto the clean video again (seconds of local rendering)."""
+    from engines import text_layer
+    run = await _load(ctx, run_id)
+    if run["status"] != "completed":
+        raise HTTPException(409, "Wait until the video is finished.")
+    ex = (run.get("execution") or {}).get(body.step_id) or {}
+    o = next((o for o in ex.get("outputs") or [] if o.get("text_layer")), None)
+    if not o:
+        raise HTTPException(404, "This video has no editable text.")
+    old = o["text_layer"]
+    o["text_layer"] = text_layer.layer(body.items, old["width"], old["height"], old["duration"])
+    run.update(status="executing", rerender={"step_id": body.step_id, "text": True}, cancel_requested=False)
+    ex["message"] = "Updating the text"
+    _event(run, f"Text edited: {len(o['text_layer']['items'])} texts")
+    run.pop("job", None)
+    await _save(ctx, run)
+    await ctx.jobs.enqueue("palette_video.text", {"run_id": run_id, "step_id": body.step_id},
+                           idempotency_key=f"text:{run_id}:{body.step_id}:{len(run['events'])}")
+    return _public(run)
+
+
+@router.get("/runs/{run_id}/clean/{step_id}", dependencies=READ)
+async def clean_video(run_id: str, step_id: str, ctx: PluginContext = Depends(get_plugin_context)):
+    """The video without its text layer (to edit the words on, or to download for another editor)."""
+    run = await _load(ctx, run_id)
+    o = next((o for o in ((run.get("execution") or {}).get(step_id) or {}).get("outputs") or []
+              if o.get("text_layer")), None)
+    if not o:
+        raise HTTPException(404, "This video has no clean version.")
+    if o.get("clean_path") and Path(o["clean_path"]).is_file():
+        return FileResponse(o["clean_path"], media_type="video/mp4", filename=f"{run_id}-{step_id}-clean.mp4")
+    url = (o.get("clean_storage") or {}).get("file_url") or ""
+    local = _local_file(url) if url else None
+    if local:
+        return FileResponse(local, media_type="video/mp4", filename=f"{run_id}-{step_id}-clean.mp4")
+    if url and not url.startswith("file://"):
+        return RedirectResponse(url)
+    raise HTTPException(404, "This video has no clean version.")
+
+
 @router.get("/runs/{run_id}/scenes/{step_id}/{n}/{kind}", dependencies=READ)
 async def scene_media(run_id: str, step_id: str, n: int, kind: str, ctx: PluginContext = Depends(get_plugin_context)):
     """A scene's stored first frame ("still") or clip ("clip")."""
@@ -942,7 +1090,7 @@ async def upload_file(run_id: str, file: UploadFile = File(...), ctx: PluginCont
         raise HTTPException(409, "Files can only be added before analysis or when the router asks for them.")
     modality = _modality(file)
     if not modality:
-        raise HTTPException(415, f"{file.filename}: only images, video, audio and documents (PDF, TXT, MD) are supported.")
+        raise HTTPException(415, f"{file.filename}: only images, video, audio and documents (PDF, Word, TXT, MD) are supported.")
     data = await file.read()
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"{file.filename} is larger than 500 MB.")

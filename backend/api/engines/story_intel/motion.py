@@ -1,6 +1,6 @@
 """3D Motion Graphics Director: the user's "Universal 3D Motion Graphics & Mixed-Media Production" master prompt
 (prompts/motion_graphics_3d_master.md, verbatim) plus this app's runtime section, as one agent of Story Intelligence.
-Full 3D: Section 4 of the master prompt in every scene, with the words as 3D letters inside the scene. Chosen for education, finance, business, marketing, psychology, science and
+Full 3D: Section 4 of the master prompt in every scene; the words are an editable 3D / flat text layer on top. Chosen for education, finance, business, marketing, psychology, science and
 technology concepts, study / learning topics and commercial explainers (and whenever the user asks for 3D motion
 graphics) - stories with characters, documentaries of real footage, presenters and cooking keep their own agents.
 
@@ -8,7 +8,7 @@ The master prompt's stages map onto this app:
     Stage 1  topic ideas            only when the input has no real topic (the chat offers 5 titles to pick)
     Stage 2  script + visual beats  HOOK -> REFRAME -> CORE MECHANISM -> INSIGHT -> CLOSING TRUTH, <= 14 words a line
     Stage 3  palette lock           3 palette directions; the director picks the best fit, the user can switch
-    Stage 4  keyframe prompts       one art-directed full-3D keyframe per beat, the words as 3D letters in it
+    Stage 4  keyframe prompts       one art-directed full-3D keyframe per beat, with no text in it
     Stage 5  motion prompts         the 6-second timeline adapted to each scene's clip length + SFX + transitions
     Stage 6  capability analysis    the live app registry (engines/video_intelligence.apps_summary)
     Stage 7-8 generation + QC       the film engine: keyframe -> AI clip -> frame / clip AI checks (incl. the
@@ -81,10 +81,12 @@ FULL 3D (the user's direction for this studio): Section 4 is used in EVERY scene
 - 4.1 + 4.4: the hero is a real 3D object with purposeful 3D motion, and the camera moves in 3D (dolly, orbit, arc,
   crane, macro push-in, Z-axis) - camera movement never replaces object animation.
 - 4.3: name the materials and the key / fill / rim lights, reflections, ambient occlusion and contact shadows.
-- 4.5: the TYPOGRAPHY TEXT is built INTO the 3D scene as dimensional letters (solid extruded, layered, printed or
-  painted, passing behind or emerging from objects - see REALISTIC LOOK for the material): write the exact words in quotes inside the keyframe prompt and say
-  their material, size, position and how they sit in the space. Keep it to 1-3 words when possible (4 at most), so
-  the image model spells them exactly; the app checks the spelling of every frame and redraws a wrong one.
+- 4.5 (the user's direction, overrides the master prompt): the TYPOGRAPHY TEXT is NOT drawn by the image or video
+  model. It becomes an EDITABLE text layer the app sets on top of the finished film (the user can retype, move and
+  restyle it as 3D or flat letters). So the keyframe_prompt contains NO letters, words, numbers, logos or signage at
+  all - end it with "no text, no letters, no logos". Leave clean space in the composition where the words will sit
+  (say where in "composition", e.g. "upper third kept clear for the headline"). Give the 1-4 words in
+  "typography_text" and their look (3D extruded or flat, weight, colour) in "typography_style".
 - 4.6: exploded views only with components supported by the brief or the references.
 - Section 5 (mixed media) appears only as 3D objects in the scene (paper-textured planes, extruded vector shapes,
   halftone panels standing in space, floating grid planes) - not as flat 2D overlays.
@@ -115,25 +117,25 @@ art direction):
 - Light it like a real photo shoot that suits the art direction (soft key and fill, hard sun, practicals, low-key
   spot...), with natural contact shadows, ambient occlusion and real depth of field. No random reflections,
   lens-flare sparkles or plastic sheen.
-- Typography fits the art direction (choose the typeface style, weight and placement for THIS video: condensed
-  sans, slab, serif, rounded, hand-lettered, engraved...), made of a real solid material - matte paint, paper,
-  card, wood, stone, metal plate, printed ink - never glass, chrome or neon.
+- Typography (the editable layer) fits the art direction: say in "typography_style" the typeface feel (condensed
+  sans, slab, serif, rounded), 3D extruded or flat, and a colour from the locked palette - never glass, chrome or
+  neon.
 - Mixed-media accents come from the art direction and stay tactile and real (paper, card, print, string, tape,
   chalk, the subject's own tools).
 - Write it into every keyframe_prompt: "photorealistic, real <material> texture, <the art direction's photography
   style>".
 
 MOTION PROMPTS (Stage 5): the clip model (Kling / Seedance) animates each keyframe for 3-10 s. Adapt the six-second
-timeline to the scene's real length. The 3D letters stay rigid, solid and readable for the whole clip (they may move
-as one object - rise, rotate a little, slide behind the hero - but never morph, melt, re-spell or flicker). SFX only
-inside the clips: the narration is recorded separately.
+timeline to the scene's real length. The clip shows NO text at all (the words are the editable layer on top); keep
+the space planned for them clear. SFX only inside the clips: the narration is recorded separately.
 
 CAPABILITIES (Stage 6) - only what these apps can really do; never invent capabilities:
 {APPS}
 Here every 3D scene is "photorealistic 3D appearance generated directly by a video model" (Stage 6, method 1):
 keyframe image (Nano Banana Pro) -> image-to-video clip (Kling 3.0 Pro / Seedance) -> AI frame and clip checks ->
-joined film -> narration, music, effects. Say so in "production" and name the honest limitations (no editable 3D
-object; very small or long text may come out misspelled and is redrawn).
+joined film -> narration, music, effects -> the words as an editable text layer (3D or flat letters) on top. Say so
+in "production" and name the honest limitations (no editable 3D object; the text is a layer over the film, not an
+object inside the 3D scene).
 
 LENGTH: {LENGTH}. PALETTE: {PALETTE_RULE}
 
@@ -153,9 +155,9 @@ Return ONLY JSON:
  "palette": {"option": 1 | 2 | 3, "name": "...", "why": "why it fits this topic"},
  "scenes": [{"n": 1, "beat": "B01", "script_line": "exact sentence", "duration_s": 3-10 (about the time to say the
   line plus a beat to read the type), "visual_concept": "what the viewer sees", "hero_subject": "main subject and
-  visual metaphor", "keyframe_prompt": "the complete TEXT-TO-IMAGE PROMPT (100-170 words): the full 3D scene, with
-  the typography words in quotes as 3D letters", "typography_text": "1-4 exact words from the line",
-  "typography_style": "3D letter material, weight, scale, position, how it sits in the space",
+  visual metaphor", "keyframe_prompt": "the complete TEXT-TO-IMAGE PROMPT (100-170 words): the full 3D scene with
+  NO text, letters or logos in it", "typography_text": "1-4 exact words from the line (the editable text layer)",
+  "typography_style": "3D extruded or flat, weight, colour, where it sits in the frame",
   "three_d_elements": "geometry, materials, depth, lighting", "graphic_elements": "mixed-media accents as 3D
   objects", "composition": "foreground / middle ground / background and placement", "lighting": "...",
   "color": "the locked palette for this frame",
@@ -266,8 +268,8 @@ def to_plan(d: dict) -> dict:
             "transition_out": m.get("transition_out") or "",
             "start_state": s.get("keyframe_prompt") or "", "end_state": s.get("end_frame") or m.get("transition_out") or "",
             "props": s.get("three_d_elements") or "",
-            # Full 3D: the words are 3D letters inside the keyframe (master prompt 4.5), not a flat overlay added later.
-            "in_scene_text": s.get("typography_text") or "", "on_screen_text": "",
+            # The words are an editable text layer over the film (text_layer.py), never drawn into the keyframe.
+            "in_scene_text": "", "overlay_text": s.get("typography_text") or "", "on_screen_text": "",
             "typography_style": s.get("typography_style") or "",
             "prompt": {"subject": s.get("hero_subject") or "", "environment": s.get("composition") or "",
                        "action": " ".join(x for x in (m.get("hero_object_motion"), m.get("three_d_animation")) if x),

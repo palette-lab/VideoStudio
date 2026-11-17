@@ -110,19 +110,44 @@ def test_develop_runs_the_agents_in_order(monkeypatch):
         if stage == "story.research":
             assert "SOURCE: Titanic" in messages[1]["content"]
             return {"summary": "sank 1912", "facts": [{"claim": "sank 15 April 1912", "source": "Titanic"}]}
-        if stage.startswith("story.architect"):
-            return plan([scene(1), scene(2), scene(3)], fact_notes=[{"claim": "sank 1912", "source": "Titanic"}])
+        if stage.startswith("story.documentary"):  # a documentary: the cinematic-skill master prompt directs it
+            system = messages[0]["content"]
+            assert "CINEMATIC DOCUMENTARY & PRESENTATION FILM MASTER PROMPT" in system and '"hit_word"' in system
+            assert '"archive": ["A1"]' in system and "A1: RMS Titanic departing Southampton (1912)" in messages[1]["content"]
+            assert "PRESENTED by a host" in system
+            doc = dict(hero="the pinned photo of the ship", hit_word="sure", overlay_text="APRIL 1912", archive=["A1"])
+            host = dict(host=True, hero="the host", audio={"type": "dialogue", "speaker": "Host",
+                                                           "line": "One night in April, an unsinkable ship sank."})
+            return plan([scene(1, **host), scene(2, **doc), scene(3, **host)], look="wall",
+                        host={"look": "woman in her forties, dark coat", "setting": "archive room",
+                              "voice_gender": "female"},
+                        fact_notes=[{"claim": "sank 1912", "source": "Titanic"}])
         if stage == "story.validate":
+            assert "CINEMATIC DOCUMENTARY plan" in messages[0]["content"]
             return {"score": 90, "pass": True, "issues": []}
         raise AssertionError(stage)
 
     async def fake_gather(queries, lang="en"):
         return [{"title": "Titanic", "url": "https://en.wikipedia.org/wiki/Titanic", "text": "RMS Titanic sank.",
                  "kind": "wikipedia"}]
+    async def fake_archive(queries, limit=8):
+        assert queries == ["Titanic"]
+        return [{"id": "A1", "what": "RMS Titanic departing Southampton", "date": "1912", "license": "Public domain",
+                 "url": "https://upload.wikimedia.org/t.jpg", "source": "https://commons.wikimedia.org/wiki/File:T.jpg",
+                 "credit": "F.G.O. Stuart", "title": "File:T.jpg"}]
     monkeypatch.setattr(story_intel.llm, "chat_json", fake)
     monkeypatch.setattr(story_intel.research_, "gather", fake_gather)
+    monkeypatch.setattr(story_intel.research_, "archive_photos", fake_archive)
     intel = asyncio.run(story_intel.develop("history of the titanic", duration_s=None))
-    assert calls == ["story.classify", "story.research", "story.architect", "story.validate"]
+    assert calls == ["story.classify", "story.research", "story.documentary", "story.validate"]
+    assert intel["mode"] == "cinematic_doc"
+    block = json.loads(story_intel.engine_block(intel))
+    assert "cinematic documentary, 'wall' look" in block["mode"] and block["scenes"][0]["hero"]
+    assert block["scenes"][1]["archive"] == ["A1"] and block["archive"][0]["id"] == "A1"
+    assert block["scenes"][0]["host"] and block["host"]["voice_gender"] == "female" and "presenter on camera" in block["mode"]
+    assert "opened and closed by a host" in story_intel.as_brief(intel)
+    assert intel["archive"][0]["credit"] == "F.G.O. Stuart"
+    assert "cinematic documentary in the 'wall' look" in story_intel.as_brief(intel)
     assert intel["validation"]["passed"] and intel["research"]["sources"][0]["url"].endswith("Titanic")
 
 
@@ -164,7 +189,8 @@ def test_motion_director_output_becomes_a_story_plan():
            "scenes": [mg_scene(1), mg_scene(2, "It labels cash into invisible jars.", "invisible jars")]}
     plan = motion.to_plan(raw)
     s = plan["scenes"][0]
-    assert s["audio"]["line"] == "Your brain spends money before you do." and s["in_scene_text"] == "spends money"
+    assert s["audio"]["line"] == "Your brain spends money before you do." and s["overlay_text"] == "spends money"
+    assert s["in_scene_text"] == ""  # no letters drawn into the keyframe: the words are the editable text layer
     assert s["on_screen_text"] == ""  # full 3D: the words are 3D letters in the keyframe, never a flat overlay
     assert s["motion_gfx"]["keyframe_prompt"] and "Dark Technical Minimal" in plan["style"]["look"]
     assert plan["motion_graphics"]["palette"]["option"] == 2 and plan["motion_graphics"]["connection"] == "S01 -> S02"
@@ -182,7 +208,8 @@ def test_motion_director_output_becomes_a_story_plan():
     assert motion.wants_stylized("a glass brain ad") and not motion.wants_stylized("how habits form in the brain")
     block = json.loads(story_intel.engine_block({"mode": "motion_graphics", "plan": plan}))
     assert block["mode"].startswith("full 3D motion graphics") and block["scenes"][0]["keyframe_prompt"]
-    assert block["scenes"][0]["in_scene_text"] == "spends money" and "INSIDE the keyframe" in block["mode"]
+    assert block["scenes"][0]["overlay_text"] == "spends money" and "editable text layer" in block["mode"]
+    assert "NO text" in block["mode"]
 
 
 def test_motion_route_topic_ideas_and_palette_switch(monkeypatch):
@@ -231,7 +258,8 @@ def test_director_uses_the_users_master_prompt_verbatim_plus_full_3d():
     system = msgs[0]["content"]
     assert system.startswith(master)  # the master prompt, word for word, first
     for must in ("4.5 3D typography", "THE GOLDEN RULE", "STAGE 6", "FULL 3D", "Section 4 is used in EVERY scene",
-                 "3D letters", "- Storyboard & Video: ...", "Target 30 seconds"):
+                 "EDITABLE text layer", "no text, no letters, no logos", "- Storyboard & Video: ...",
+                 "Target 30 seconds"):
         assert must in system
     assert "{APPS}" not in system and "{LENGTH}" not in system and "{PALETTE_RULE}" not in system
     assert "{STYLES}" not in system and "DIFFERENT FOR EVERY VIDEO" in system and "REALISTIC LOOK" in system
@@ -296,12 +324,21 @@ def test_a_talking_host_skips_the_story_writer_and_never_becomes_a_storyboard_fi
         stages.append(kw["stage"])
         if kw["stage"] == "story.classify":  # what the classifier really returned for the compound-interest host
             return {"category": "educational", "agent": "presenter", "production": "cinematic", "has_topic": True,
-                    "research": "light", "duration_s": 60}
+                    "research": "light", "duration_s": 60, "subject": "compound interest"}
+        if kw["stage"] == "story.research":  # the presentation still gets the cinematic-skill research
+            return {"summary": "interest on interest", "facts": [{"claim": "interest is added to the principal",
+                                                                  "source": "Compound interest"}]}
         raise AssertionError(kw["stage"])
+
+    async def fake_gather(queries, lang="en"):
+        return [{"title": "Compound interest", "url": "https://en.wikipedia.org/wiki/Compound_interest",
+                 "text": "Compound interest is interest on interest.", "kind": "wikipedia"}]
     monkeypatch.setattr(story_intel.llm, "chat_json", fake)
+    monkeypatch.setattr(story_intel.research_, "gather", fake_gather)
     intel = asyncio.run(story_intel.develop("A 60-second YouTube explainer: a friendly host at a desk explains "
                                             "how compound interest works"))
-    assert intel.get("skipped") and "plan" not in intel and stages == ["story.classify"]
+    assert intel.get("skipped") and "plan" not in intel and stages == ["story.classify", "story.research"]
+    assert intel["research"]["facts"][0]["source"] == "Compound interest"  # handed to Presenter Studio's script
     # A story written before this fix (agent presenter, category educational) still goes through the router.
     old = {"mode": "auto", "assets": {}, "story_intel": {"plan": {"scenes": [{"n": 1}]},
                                                          "classification": {"category": "educational",
@@ -309,3 +346,84 @@ def test_a_talking_host_skips_the_story_writer_and_never_becomes_a_storyboard_fi
     assert direct.applies(old) is False
     old["story_intel"]["classification"]["agent"] = "explainer"
     assert direct.applies(old) is True
+
+
+def test_documentary_method_applies_to_real_subjects_and_checks_its_rules():
+    from engines.story_intel import documentary
+    assert documentary.applies({"category": "documentary"})
+    assert documentary.applies({"category": "educational", "is_factual": True})  # a factual presentation
+    assert not documentary.applies({"category": "educational", "is_factual": True, "production": "motion_graphics"})
+    assert not documentary.applies({"category": "fiction"}) and not documentary.applies({"category": "product"})
+    line = {"type": "narration", "line": "Twelve seconds changed everything."}
+    good = {"scenes": [{"hero": "the photo", "hit_word": "Twelve", "overlay_text": "DEC 17, 1903", "audio": line}],
+            "look": "wall"}
+    assert documentary.lint(good) == []
+    bad = {"look": "neon", "scenes": [{"hero": "", "hit_word": "flight", "audio": line,
+                                       "overlay_text": "Twelve seconds changed everything"}]}
+    problems = " | ".join(p["problem"] for p in documentary.lint(bad))
+    assert "not one of the method's looks" in problems and "no hero" in problems
+    assert "'flight' is not in the spoken line" in problems and "repeat the narration word for word" in problems
+    assert "Never generate a stand-in face" in documentary.MASTER and "One hero per line" in documentary.MASTER
+
+
+def test_archive_photos_keep_only_free_licences_and_write_credits():
+    ok = research.free_licence
+    assert ok("Public domain") and ok("PD-US") and ok("CC0") and ok("CC BY 4.0") and ok("CC BY-SA 3.0")
+    assert not ok("CC BY-NC 2.0") and not ok("CC BY-ND 4.0") and not ok("No known copyright restrictions")
+    assert not ok("Fair use") and not ok("")
+    md = research.credits_md([{"what": "First flight", "credit": "John T. Daniels", "license": "Public domain",
+                               "source": "https://commons.wikimedia.org/wiki/File:First_flight2.jpg"}])
+    assert "John T. Daniels - Public domain - https://commons.wikimedia.org" in md and research.credits_md([]) == ""
+    from engines.story_intel import documentary
+    bad = {"scenes": [{"hero": "x", "archive": ["A9"]}]}
+    assert "archive photo A9 does not exist" in documentary.lint(bad, {"A1"})[0]["problem"]
+
+
+def test_archive_searches_are_short_keywords_and_documentaries_get_their_own_finish():
+    cls = {"research_queries": ["1815 eruption of Mount Tambora effects",
+                                "Year Without a Summer 1816 causes and consequences"], "subject": "Year Without a Summer"}
+    assert research.archive_queries(cls) == ["1815 eruption Mount", "Year Without Summer"]
+    assert research.archive_queries({"archive_queries": ["Mount Tambora", "Villa Diodati"]}) == ["Mount Tambora",
+                                                                                                "Villa Diodati"]
+    from engines import motion_design
+    text = motion_design.finish_summary("documentary")
+    assert "Documentary finish" in text and "no punch-ins, pop words or callouts" in text
+
+
+def test_documentary_host_opens_and_closes():
+    from engines.story_intel import documentary
+    line = lambda t: {"type": "narration", "line": t}
+    board = {"hero": "the photo", "hit_word": "ship", "audio": line("The ship left port.")}
+    no_host = {"scenes": [dict(board), dict(board), dict(board)]}
+    problems = " | ".join(p["problem"] for p in documentary.lint(no_host))
+    assert "should be the host on camera" in problems and "the host has no look" in problems
+    host = {"host": True, "audio": {"type": "dialogue", "line": "It was the safest ship ever built."}}
+    good = {"host": {"look": "a calm man in his fifties"}, "scenes": [host, dict(board), dict(host)]}
+    assert documentary.lint(good) == []
+    assert "a host scene in the middle" in documentary.lint({**good, "scenes": [host, host, host]})[0]["problem"]
+
+
+def test_a_fix_returns_only_the_changed_scenes_and_a_worse_rewrite_is_never_kept(monkeypatch):
+    prev = plan([scene(1), scene(2), scene(3)], fact_notes=["a"])
+    merged = story_intel.merge_patch(prev, {"scenes": [{"n": 2, "title": "Fixed"}], "fact_notes": ["a", "b"]})
+    assert [s["title"] for s in merged["scenes"]] == ["Scene 1", "Fixed", "Scene 3"]
+    assert merged["scenes"][1]["what_happens"] == prev["scenes"][1]["what_happens"]  # fields it left out stay
+    assert merged["fact_notes"] == ["a", "b"] and merged["title"] == prev["title"]
+    assert len(story_intel.merge_patch(prev, {"scenes_all": [scene(1)]})["scenes"]) == 1  # a structural fix
+    rev = lambda score, rules=0, facts=0, passed=False: {"passed": passed, "score": score, "rules": [{}] * rules,
+                                                        "issues": [{"area": "facts"}] * facts}
+    assert not story_intel._better(rev(82, rules=0), rev(86, rules=1))  # the 1816 case: lower score, fewer notes
+    assert story_intel._better(rev(80, facts=0), rev(90, facts=2))  # a fact error fixed beats a nicer score
+    assert story_intel._better(rev(70, passed=True), rev(90))
+
+    sent = {}
+
+    async def fake(model, messages, **kw):
+        sent["stage"], sent["last"], sent["tokens"] = kw["stage"], messages[-1]["content"], kw["max_tokens"]
+        return {"scenes": [{"n": 1, "title": "Better opening"}]}
+    monkeypatch.setattr(story_intel.llm, "chat_json", fake)
+    cls = {"category": "fiction", "duration_s": 18}
+    out = asyncio.run(story_intel.architect("a fable", cls, None, [], "9:16",
+                                            [{"scene": 1, "area": "scenes", "problem": "weak", "fix": "stronger"}], prev))
+    assert sent["stage"] == "story.architect.revise" and "ONLY what changes" in sent["last"] and sent["tokens"] == 16000
+    assert [s["title"] for s in out["scenes"]] == ["Better opening", "Scene 2", "Scene 3"]

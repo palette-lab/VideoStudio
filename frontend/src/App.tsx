@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { usePlatform } from "@palettelab/sdk"
 import { api, bindPlatform, type Settings, type Run } from "./api"
 import { useT, examplesFor, type T } from "./i18n"
+import { EditableVideo } from "./textEditor"
 
 // Modes in the menu. Presenter Studio and the HyperFrames Motion Studio stay in the backend (Auto still picks them).
-const MODES = ["auto", "storyboard", "flow", "motion3d"]
+const MODES = ["auto", "storyboard", "flow", "motion3d", "explainer"]
 const MODE_IDS = new Set(MODES)
 const BUSY = new Set(["analyzing", "approved", "executing"])
 // Once a plan is approved the video is being made (or was made): these runs get the stage on the right.
@@ -209,6 +210,7 @@ export default function App() {
                 onPalette={(o: number) => act(() => api.switchPalette(r.id, o))()}
                 onCancel={() => act(() => api.cancel(r.id))()}
                 onRerender={(n: number, how: string, sid?: string) => act(() => api.rerenderScene(r.id, n, how, sid))()}
+                onText={(sid: string, items: any[]) => act(() => api.saveText(r.id, sid, items))()}
               />
             ))}
             <div ref={endRef} />
@@ -227,7 +229,8 @@ export default function App() {
             </div>
           </div>
           </div>
-          {stageRun && <Stage key={stageRun.id} run={stageRun} onCancel={() => act(() => api.cancel(stageRun.id))()} />}
+          {stageRun && <Stage key={stageRun.id} run={stageRun} onCancel={() => act(() => api.cancel(stageRun.id))()}
+            onText={(sid: string, items: any[]) => act(() => api.saveText(stageRun.id, sid, items))()} />}
         </main>
       )}
     </div>
@@ -363,7 +366,18 @@ function Composer({ hero, busy, placeholder, defaultMode, onSend }: {
         value={text}
         disabled={busy}
         onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !hero) { e.preventDefault(); submit() } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit() }}
+        onKeyDown={(e) => {
+          // Enter runs it; Shift+Enter or Ctrl/Cmd+Shift+Enter adds a new line. Never while an IME (Korean, ...)
+          // is still composing a character: that Enter only confirms the character.
+          if (e.key !== "Enter" || e.nativeEvent.isComposing || e.keyCode === 229) return
+          if (!e.shiftKey) { e.preventDefault(); submit(); return }
+          if (e.ctrlKey || e.metaKey) {  // browsers add no line for Ctrl+Shift+Enter themselves
+            e.preventDefault()
+            const el = e.currentTarget, a = el.selectionStart, b = el.selectionEnd
+            setText(text.slice(0, a) + "\n" + text.slice(b))
+            requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = a + 1 })
+          }
+        }}
         placeholder={placeholder || t("composer.placeholder")}
         rows={hero ? 4 : 1}
       />
@@ -371,7 +385,7 @@ function Composer({ hero, busy, placeholder, defaultMode, onSend }: {
         <button className="vr-chipbtn" onClick={() => input.current?.click()} aria-label={t("composer.addFilesAria")}>
           {I.clip}<span>{files.length ? t("composer.filesAdded", { n: files.length }) : hero ? t("composer.addFiles") : ""}</span>
         </button>
-        <input ref={input} type="file" multiple hidden accept="image/*,video/*,audio/*,.pdf,.txt,.md,application/pdf,text/plain" onChange={(e) => { add(e.target.files); e.target.value = "" }} />
+        <input ref={input} type="file" multiple hidden accept="image/*,video/*,audio/*,.pdf,.txt,.md,.docx,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(e) => { add(e.target.files); e.target.value = "" }} />
         <label className={`vr-pick ${length ? "on" : ""}`} title={t("composer.lengthHint")}>
           {I.clock}
           <select aria-label={t("composer.length")} value={length} onChange={(e) => setLength(e.target.value)}>
@@ -762,7 +776,7 @@ function Analysis({ run }: { run: Run }) {
   )
 }
 
-function Answer({ run, latest, staged, onAnswer, onApprove, onRecover, onSelect, onRerun, onCancel, onRerender }: any) {
+function Answer({ run, latest, staged, onAnswer, onApprove, onRecover, onSelect, onRerun, onCancel, onRerender, onText }: any) {
   const { t } = useT()
   const s = run.status
   if (s === "analyzing") return latest ? <div className="vr-row"><button className="vr-ghost sm" onClick={onCancel}>{t("chat.cancel")}</button></div> : null
@@ -791,7 +805,7 @@ function Answer({ run, latest, staged, onAnswer, onApprove, onRecover, onSelect,
     )
   }
   if (!run.plan) return null
-  return <PlanAnswer run={run} latest={latest} staged={staged} onApprove={onApprove} onRecover={onRecover} onSelect={onSelect} onRerun={onRerun} onRerender={onRerender} />
+  return <PlanAnswer run={run} latest={latest} staged={staged} onApprove={onApprove} onRecover={onRecover} onSelect={onSelect} onRerun={onRerun} onRerender={onRerender} onText={onText} />
 }
 
 function Ask({ run, live, onAnswer, onRerun }: any) {
@@ -831,7 +845,7 @@ function Ask({ run, live, onAnswer, onRerun }: any) {
   )
 }
 
-function PlanAnswer({ run, latest, staged, onApprove, onRecover, onSelect, onRerun, onRerender }: any) {
+function PlanAnswer({ run, latest, staged, onApprove, onRecover, onSelect, onRerun, onRerender, onText }: any) {
   const { t } = useT()
   const { plan, apps } = run
   const [accept, setAccept] = useState(false)
@@ -850,7 +864,7 @@ function PlanAnswer({ run, latest, staged, onApprove, onRecover, onSelect, onRer
 
       {plan.steps.filter((st: any) => st.finish).slice(0, 1).map((st: any) => (
         <p key={st.step_id} className={`vr-finish ${st.finish.level}`}>
-          <span className="vr-chip">{I.spark}{st.finish.level === "full" ? t("plan.effects") : t("plan.clean")}</span>
+          <span className="vr-chip">{I.spark}{st.finish.level === "full" ? t("plan.effects") : st.finish.level === "documentary" ? t("plan.documentary") : t("plan.clean")}</span>
           <span>{st.finish.summary}</span>
         </p>
       ))}
@@ -900,7 +914,7 @@ function PlanAnswer({ run, latest, staged, onApprove, onRecover, onSelect, onRer
         </div>
       )}
 
-      {run.report && <Result run={run} staged={staged} onRerender={onRerender} />}
+      {run.report && <Result run={run} staged={staged} onRerender={onRerender} onText={onText} />}
     </div>
   )
 }
@@ -1068,7 +1082,15 @@ function useRunVideo(run: Run) {
   return { last, url, err }
 }
 
-function Result({ run, staged, onRerender }: { run: Run; staged?: boolean; onRerender?: (n: number, how: string, sid?: string) => void }) {
+/** The finished video's editable text layer, when its words were kept out of the pixels (presenter, 3D motion). */
+function textLayerOf(run: Run, last: any) {
+  const o = last?.outputs?.[0]
+  return o?.text_layer?.items && o?.has_clean ? o.text_layer : null
+}
+const textBusy = (run: Run) => run.status === "executing" && !!run.rerender?.text
+
+function Result({ run, staged, onRerender, onText }: { run: Run; staged?: boolean; onRerender?: (n: number, how: string, sid?: string) => void
+  onText?: (sid: string, items: any[]) => void }) {
   const { t } = useT()
   const r = run.report
   const { last, url, err } = useRunVideo(run)
@@ -1100,7 +1122,10 @@ function Result({ run, staged, onRerender }: { run: Run; staged?: boolean; onRer
       {last?.outputs?.[0]?.graphics_error && <p className="vr-muted sm">Graphics were skipped: {last.outputs[0].graphics_error}</p>}
       {last?.outputs?.[0]?.graphics_note && <p className="vr-muted sm">{last.outputs[0].graphics_note}</p>}
       {last?.outputs?.[0]?.title && <p className="vr-film-title">“{last.outputs[0].title}”{last.outputs[0].story ? <span> {last.outputs[0].story}</span> : null}</p>}
-      {last && (
+      {last && textLayerOf(run, last) && onText ? (
+        <EditableVideo runId={run.id} stepId={last.step_id} layer={textLayerOf(run, last)} finalUrl={url}
+          busy={textBusy(run)} onSave={(items) => onText(last.step_id, items)} />
+      ) : last && (
         <div className="vr-video">
           {url ? <video controls preload="metadata" src={url} /> : err ? <p className="vr-bad sm">{err}</p> : <div className="vr-loading"><span className="vr-spin" /> {t("result.loadingVideo")}</div>}
           {url && <a className="vr-ghost sm" href={url} download={`videostudio-${run.id}.mp4`}>{t("result.downloadVideo")}</a>}
@@ -1216,7 +1241,7 @@ function SceneMedia({ sc, index, ratio, pending }: { sc: any; index: number; rat
   )
 }
 
-function Stage({ run, onCancel }: { run: Run; onCancel?: () => void }) {
+function Stage({ run, onCancel, onText }: { run: Run; onCancel?: () => void; onText?: (sid: string, items: any[]) => void }) {
   const { t } = useT()
   const { plan, apps } = run
   const working = BUSY.has(run.status)
@@ -1254,7 +1279,10 @@ function Stage({ run, onCancel }: { run: Run; onCancel?: () => void }) {
         {!working && url && <a className="vr-ghost sm" href={url} download={`videostudio-${run.id}.mp4`}>{t("studio.download")}</a>}
       </div>
 
-      <div className={`vr-screen ${shape.vertical ? "vertical" : ""}`} style={{ aspectRatio: shape.ratio }}>
+      {last && textLayerOf(run, last) && onText && (!working || textBusy(run)) ? (
+        <EditableVideo runId={run.id} stepId={last.step_id} layer={textLayerOf(run, last)} finalUrl={url}
+          busy={textBusy(run)} onSave={(items) => onText(last.step_id, items)} fill />
+      ) : <div className={`vr-screen ${shape.vertical ? "vertical" : ""}`} style={{ aspectRatio: shape.ratio }}>
         {url ? (
           <video controls autoPlay muted playsInline preload="metadata" src={url} />
         ) : working && (preview || live.presenter_url) ? (
@@ -1283,7 +1311,7 @@ function Stage({ run, onCancel }: { run: Run; onCancel?: () => void }) {
           </div>
         )}
         {working && <span className="vr-screen-bar" style={{ width: `${pct}%` }} aria-hidden />}
-      </div>
+      </div>}
 
       <div className="vr-stage-scenes">
         <h3>{t("studio.scenes")} <span className="vr-muted">· {madeLabel}</span></h3>

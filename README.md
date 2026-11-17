@@ -74,8 +74,18 @@ images) into a production plan the user can review, edit scene by scene, regener
    exact on-screen words are added by the motion-design pass, never drawn by the image model. A request without a
    topic first offers five topic ideas to pick from.
 
+Document Explainer: upload a PDF, Word (.docx), TXT or Markdown file (Auto, or the "Document Explainer" mode). The
+LLM analyses it (facts with where they are in the document, the angle, an outline), writes the narration and the
+drawings, and [explainroo](https://github.com/vincentsch/explainroo) 0.6.0 (MIT, (c) 2026 Vincent Schmalbach)
+renders them on this computer: Kokoro voice, Whisper word timing, Chrome drawing, ffmpeg, with music, subtitles,
+chapters and a cover. Needs Node 20.11+, ffmpeg and Chrome; the first run downloads ~400 MB of voice models
+(`npx --yes explainroo@0.6.0 doctor --fetch`). Generated drawing code with network calls or eval is refused.
+
 Method credits: [cinematic-skill](https://github.com/Moh4696/cinematic-skill) (MIT, (c) 2026 exploraX): story
-shapes, research rules and the narration lint. Its Skia renderer is not used; this app generates AI video clips.
+shapes, research rules, the narration lint, and the whole film method for documentaries and factual presentations
+(the Cinematic Documentary Director, `backend/api/engines/prompts/cinematic_documentary_master.md`: one world, one
+camera, one hero per line, hits on the spoken word, looks, items, sound, no AI face for a real person). Its Skia
+renderer is not used; this app generates AI video clips and sets every typed word as an editable text layer.
 
 ## While and after it renders
 

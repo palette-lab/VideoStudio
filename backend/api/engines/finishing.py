@@ -409,6 +409,31 @@ async def run(app: dict, brief: str, plan: dict, video: str, scene_paths: list[s
     ffmpeg = video_merge.find_ffmpeg()
     if not ffmpeg:
         raise RuntimeError("ffmpeg is not installed")
+    gp = await plan_graphics(app, brief, plan, video, scene_paths, narration, aspect_ratio, work, progress,
+                             busy, level, captions)
+    drawable = (gp.get("hook") or {}).get("text") or gp.get("overlays") or (gp.get("end_card") or {}).get("title")
+    if not drawable or (not gp.get("add_graphics", True) and not asked_for(brief)):
+        await progress(f"{app['name']}: no graphics needed ({str(gp.get('why') or '')[:160]})")
+        return {"path": video, "skipped": True, "why": gp.get("why") or "", "graphics": gp, "invented_specs": []}
+    total = await _probe(ffmpeg, video)
+    handoff = {"prompt": motion_brief(gp, total, plan), "request": {"aspect_ratio": aspect_ratio},
+               "review_times": review_times(gp), "required_texts": required_texts(gp)}
+    out = await motion_engine.run({**app, "name": f"{app['name']} graphics"}, handoff, {}, video, work, progress,
+                                  quality, ["motion.overlay_graphics"])
+    final = await _with_audio(ffmpeg, Path(out["path"]), video, work / "final_graphics.mp4")
+    return {"path": final, "skipped": False, "why": gp.get("why") or "", "graphics": gp, "brief": handoff["prompt"],
+            "invented_specs": [str(x) for x in gp.get("invented_specs") or []],
+            "open_issues": out.get("open_issues") or []}
+
+
+async def plan_graphics(app: dict, brief: str, plan: dict, video: str, scene_paths: list[str], narration: list[str],
+                        aspect_ratio: str, work: Path, progress, busy: list | None = None, level: str = "",
+                        captions: str | None = None) -> dict:
+    """The graphics director's plan for the finished footage (hook, overlays, end card), checked and placed, but not
+    drawn: run() renders it into the pixels; the editable text layer (text_layer.py) turns its words into text items."""
+    ffmpeg = video_merge.find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is not installed")
     work.mkdir(parents=True, exist_ok=True)
     await progress(f"{app['name']}: " + ("planning the hook and title typography" if level == "clean"
                                           else "planning the motion design: hook, callouts and labels"))
@@ -431,16 +456,4 @@ async def run(app: dict, brief: str, plan: dict, video: str, scene_paths: list[s
         kept.append(o)
     if gp.get("overlays") is not None:
         gp["overlays"] = kept
-    drawable = (gp.get("hook") or {}).get("text") or gp.get("overlays") or (gp.get("end_card") or {}).get("title")
-    if not drawable or (not gp.get("add_graphics", True) and not asked_for(brief)):
-        await progress(f"{app['name']}: no graphics needed ({str(gp.get('why') or '')[:160]})")
-        return {"path": video, "skipped": True, "why": gp.get("why") or "", "graphics": gp, "invented_specs": []}
-    total = await _probe(ffmpeg, video)
-    handoff = {"prompt": motion_brief(gp, total, plan), "request": {"aspect_ratio": aspect_ratio},
-               "review_times": review_times(gp), "required_texts": required_texts(gp)}
-    out = await motion_engine.run({**app, "name": f"{app['name']} graphics"}, handoff, {}, video, work, progress,
-                                  quality, ["motion.overlay_graphics"])
-    final = await _with_audio(ffmpeg, Path(out["path"]), video, work / "final_graphics.mp4")
-    return {"path": final, "skipped": False, "why": gp.get("why") or "", "graphics": gp, "brief": handoff["prompt"],
-            "invented_specs": [str(x) for x in gp.get("invented_specs") or []],
-            "open_issues": out.get("open_issues") or []}
+    return gp

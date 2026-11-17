@@ -100,6 +100,14 @@ export const api = {
     if (!res.ok) throw new Error(await readError(res))
     return URL.createObjectURL(await res.blob())
   },
+  /** Save the edited words; the server renders them onto the clean video again (a new version of the video). */
+  saveText: (id: string, stepId: string, items: unknown[]) => post(`/runs/${id}/text`, { step_id: stepId, items }),
+  /** The video without its text layer (to edit the words on, or to download for another editor). */
+  async cleanUrl(id: string, stepId: string): Promise<string> {
+    const res = await apiFetch(`${BASE}/runs/${id}/clean/${stepId}`)
+    if (!res.ok) throw new Error(await readError(res))
+    return URL.createObjectURL(await res.blob())
+  },
   async outputUrl(id: string, stepId: string): Promise<string> {
     const res = await apiFetch(`${BASE}/runs/${id}/output/${stepId}`)
     if (!res.ok) throw new Error(await readError(res))

@@ -8,7 +8,7 @@ Classification for each alternative:
 
 import copy
 
-from . import registry, router, validator
+from . import handoff, registry, router, validator
 from .schemas import Brief
 
 
@@ -63,15 +63,63 @@ def fallback_options(run: dict, step_id: str) -> list[dict]:
     return sorted(out, key=lambda f: order[f["classification"]])
 
 
+# What the user asked for, whichever app makes it: carried over when a step switches app.
+KEEP = ("duration", "total_duration", "duration_given", "aspect_ratio", "language", "production_type", "references",
+        "audio_mode", "scenes", "scene_count")
+
+
+def _analysis_prompt(run: dict) -> str:
+    """The prompt the plan was analysed from (main.py: the user's words first, then the enhanced brief)."""
+    words, planned = run.get("prompt") or "", run.get("enhanced_prompt")
+    return (f"{words}\n\nDetailed version of this request (written from the words above; follow it, but the words "
+            f"above win wherever they differ):\n{planned}") if planned else words
+
+
+def retarget(run: dict, step: dict, old: dict | None) -> dict:
+    """The step's handoff for its new app: rebuilt from the brief, keeping the user's length, format and the
+    approved story's request (a written film has no brief to rebuild from, so its handoff is carried over)."""
+    und = run.get("understanding") or {}
+    app = registry.apps()[step["app_id"]]
+    old = copy.deepcopy(old or {})
+    if und.get("brief") and not und.get("direct"):
+        new = handoff.build(step, Brief.model_validate(und["brief"]), _analysis_prompt(run), run.get("assets") or {},
+                            len(run["plan"]["steps"]) > 1)
+    else:
+        inv = app.get("invocation") or {}
+        new = {**old, "app_id": app["app_id"], "app_name": app["name"],
+               "endpoint": f"{inv.get('base', '')} {(inv.get('chain') or ['?'])[0]}".strip(),
+               "request": dict(old.get("request") or {}), "notes": list(old.get("notes") or [])}
+        new.setdefault("prompt", _analysis_prompt(run))
+        new["request"].setdefault("prompt", new["prompt"])
+    req, before = new["request"], old.get("request") or {}
+    if und.get("direct") or not und.get("brief"):  # a written film: its request is the approved story's
+        for k in KEEP:
+            if before.get(k) is not None:
+                req[k] = before[k]
+    length = before.get("total_duration") or before.get("duration") if before.get("duration_given", True) else None
+    if not length:  # the handoff was already dropped (older recoveries): the plan's own length
+        brief_len = ((und.get("brief") or {}).get("constraints") or {}).get("duration_s")
+        length = brief_len or (und.get("constraints") or {}).get("duration_s")
+    if length:  # the user's (or the approved story's) length wins over the new app's default
+        cap, status = registry.fact(app, "max_duration_s")
+        if cap and status in registry.SUPPORTED:
+            length = min(float(length), float(cap))
+        length = int(length) if float(length).is_integer() else float(length)
+        req["duration"] = req["total_duration"] = length
+        req["duration_given"] = True
+    return new
+
+
 def substitute(run: dict, step_id: str, app_id: str) -> list[dict]:
     """Swap the application of one step and re-validate the whole plan; revert if invalid."""
     step = next(s for s in run["plan"]["steps"] if s["step_id"] == step_id)
-    old = step["app_id"]
+    old, old_handoff = step["app_id"], step.get("handoff")
     step["app_id"] = app_id
-    step.pop("handoff", None)  # the prompt was written for the previous app
     issues = validator.validate(run["plan"], run.get("understanding") or {}, run.get("plan_mode") or run["mode"], run["assets"])
     if validator.errors(issues):
         step["app_id"] = old
+    else:  # the prompt was written for the previous app: re-target it, keeping what the user asked for
+        step["handoff"] = retarget(run, step, old_handoff)
     return issues
 
 

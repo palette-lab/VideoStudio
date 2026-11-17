@@ -21,5 +21,6 @@
   "edit.assemble_clips": "Join several clips or segments into one video in a given order.",
   "edit.transitions": "Add transitions between clips or scenes.",
   "edit.explainer_effects": "Creator-style finishing effects on a finished or filmed video (words behind the speaker, spotlight, checklists, graphs, punch-ins, stamps, grades), picked and timed by the AI from what is said and shown.",
-  "presenter.talking_head": "A person talking to camera with lip-synced speech (YouTube explainer, UGC ad, testimonial, spokesperson), from a photo of the presenter or a generated one, speaking a written script or the user's own recording."
+  "presenter.talking_head": "A person talking to camera with lip-synced speech (YouTube explainer, UGC ad, testimonial, spokesperson), from a photo of the presenter or a generated one, speaking a written script or the user's own recording.",
+  "explainer.from_document": "Read uploaded documents (PDF, Word, TXT, Markdown), analyse them and make a narrated explainer video of their content: diagrams, charts of their real numbers, lists and steps drawn on the spoken words."
 }
