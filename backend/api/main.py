@@ -1013,6 +1013,11 @@ async def get_output(run_id: str, step_id: str, ctx: PluginContext = Depends(get
         return FileResponse(local, media_type="video/mp4", filename=f"{run_id}-{step_id}.mp4")
     if url and not url.startswith("file://"):
         return RedirectResponse(url)
+    # The run is marked completed before its output is copied into app storage: in that gap, serve the render itself.
+    render = next((o["path"] for o in ex.get("outputs", []) if o.get("format") == "video_file" and o.get("path")
+                   and Path(o["path"]).is_file()), None)
+    if render:
+        return FileResponse(render, media_type="video/mp4", filename=f"{run_id}-{step_id}.mp4")
     raise HTTPException(404, "This step has no real video output.")
 
 

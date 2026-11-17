@@ -581,6 +581,14 @@ CAST_SHEET = ("CHARACTER REFERENCE SHEET for a film. {MASTER} Show every recurri
               "{STYLE}{LOCKS}")
 
 
+LOOK_FRAME = ("LOOK FRAME (style reference) for a film. {MASTER} One establishing image of the film's world that fixes "
+              "its look for every scene: the setting, background, materials and surfaces, light direction and quality, "
+              "colour palette and grade, render style and lens. No action, no characters in motion, no text.{STYLE}{LOCKS}")
+
+# Scenes are made at the same time (still -> last frame -> clip); this caps the paid calls running together.
+PARALLEL_SCENES = max(1, int(os.getenv("STORY_PARALLEL_SCENES", "6")))
+
+
 def _sound(s: dict) -> str:
     """The clip's own audio. Only an on-camera scene may contain speech; otherwise the narrator (or silence) is the
     only voice, so the clip is told to stay free of speech and the two never overlap."""
@@ -721,18 +729,36 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
 
     # One locked look (the planner's master_prompt): with no reference images of their own, recurring characters are
     # drawn once, head to toe, and every still is made from that sheet, so wardrobe, footwear and animals stay the same.
-    cast = None
-    if not ref_urls and recurring_subject(p):
-        await progress(f"{app['name']}: drawing the character sheet")
+    # Consistency first, before any scene starts: one locked look the scenes are all drawn from, so they can be
+    # made in parallel. With no reference images of their own, recurring characters are drawn once, head to toe (the
+    # character sheet: wardrobe, footwear and animals stay the same); and one look frame fixes the world (set, light,
+    # palette, materials, render style), so no scene's background or grade drifts.
+    master = p.get("master_prompt") or ""
+    locks = _locks(p.get("continuity") or {})
+
+    async def sheet(template: str, what: str, urls: list[str]) -> str | None:
         try:
-            cast = _url(await _fal(fal_helper.generate_image, key, q["image_model"],
-                                   CAST_SHEET.replace("{MASTER}", p.get("master_prompt") or "")
-                                   .replace("{STYLE}", _style(p["bible"])).replace("{LOCKS}", _locks(p.get("continuity") or {})),
-                                   aspect_ratio=ar, num_images=1), "image")
-            p["cast_sheet_url"] = cast
-        except Exception as e:  # without the sheet the stills still chain from each other
-            log.warning("character sheet failed: %s", e)
-    anchor = [cast] if cast else []
+            kw = {"aspect_ratio": ar, "num_images": 1} | ({"image_urls": urls} if urls else {})
+            return _url(await _fal(fal_helper.generate_image, key, q["image_model"],
+                                   template.replace("{MASTER}", master).replace("{STYLE}", _style(p["bible"]))
+                                   .replace("{LOCKS}", locks), **kw), "image")
+        except Exception as e:  # without it the scenes still share the style text and the references
+            log.warning("%s failed: %s", what, e)
+            return None
+
+    want_cast = not ref_urls and recurring_subject(p)
+    await progress(f"{app['name']}: locking the look" + (" and drawing the character sheet" if want_cast else "")
+                   + " before the scenes")
+    cast, look = await asyncio.gather(sheet(CAST_SHEET, "character sheet", []) if want_cast else _none(),
+                                      sheet(LOOK_FRAME, "look frame", ref_urls[:3]))
+    if cast:
+        p["cast_sheet_url"] = cast
+    if look:
+        p["look_frame_url"] = look
+    anchor = [u for u in (cast, look) if u]
+    look_note = (f"\nReference image {len(anchor)} is the film's LOOK FRAME: the same world - setting, background, "
+                 "materials, light, colour palette and grade, render style - in this shot, unless this scene's plan "
+                 "moves to a new place." if look else "")
 
     # The scenes as they are really made (stills, then clips), for the live view while the film renders.
     board = [{"title": s.get("title") or f"Scene {i + 1}", "duration": s["duration"], "still_url": None,
@@ -789,7 +815,7 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
     # Last frames (adapted from ViMax, MIT): the end of each scene is drawn from its first frame, so the clip performs
     # the action from A to B, and the NEXT scene's first frame is drawn from this last frame, so scene i+1 starts
     # exactly where scene i ended (no jump between cuts).
-    async def end_frame(i: int, s: dict) -> str | None:
+    async def end_frame(i: int, s: dict, still: str) -> str | None:
         if not s.get("end_state"):
             return None
         await progress(f"{app['name']}: scene {i + 1}/{len(p['scenes'])} last frame")
@@ -800,32 +826,29 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                   + props_line(s, last=True) + _refs_note(refs[:3], 2 + len(anchor)) + style)
         try:
             return await draw(prompt, {"aspect_ratio": ar, "num_images": 1,
-                                       "image_urls": [stills[i]] + anchor + ref_urls[:3]}, s, f"scene {i + 1} last frame",
-                              which="last", prev_url=stills[i])
+                                       "image_urls": [still] + anchor + ref_urls[:3]}, s, f"scene {i + 1} last frame",
+                              which="last", prev_url=still)
         except Exception as e:  # a missing end frame only loses the A-to-B guide; the clip still runs
             log.warning("end frame for scene %s failed: %s", i + 1, e)
             return None
 
-    # Scenes in order: first frame (from the previous scene's last frame), then this scene's last frame.
-    stills: list[str] = []
-    ends: list[str | None] = []
-    for i, s in enumerate(p["scenes"]):
+    # Every scene at the same time: its first frame from the locked look (character sheet, look frame, the user's
+    # references), then its last frame, then its clip. Continuity between scenes comes from the shared anchors and
+    # the written link to the previous scene, not from waiting for the previous scene's image.
+    stills: list[str | None] = [None] * len(p["scenes"])
+    ends: list[str | None] = [None] * len(p["scenes"])
+    gate = asyncio.Semaphore(PARALLEL_SCENES)
+
+    async def first_frame(i: int, s: dict) -> str:
         await progress(f"{app['name']}: scene {i + 1}/{len(p['scenes'])} still")
         img_kw = {"aspect_ratio": ar, "num_images": 1}
-        prev = (ends[-1] or stills[-1]) if stills else None
-        # The film's set: scene 1's frame keeps the same room, counter, background and light in every later scene
-        # (without it the kitchen or bathroom drifts into another one halfway through the film).
-        set_ref = [stills[0]] if len(stills) > 1 else []
-        urls = anchor + ref_urls[:5] + set_ref + ([prev] if prev else [])
+        urls = anchor + ref_urls[:5]
         if urls:
             img_kw["image_urls"] = urls
-        set_note = (f"\nReference image {len(anchor) + len(ref_urls[:5]) + 1} is the film's first scene: the SAME "
-                    "location - room, walls, background objects, counter or ground, light and colour grade - unless "
-                    "this scene's plan moves to a new place." if set_ref else "")
-        prompt = (s["image_prompt"] + props_line(s) + _cast_note(bool(cast)) + _refs_note(refs[:5], len(anchor) + 1)
-                  + set_note + _continuity(i, s, p["scenes"], bool(prev)) + style)
+        prompt = (s["image_prompt"] + props_line(s) + _cast_note(bool(cast)) + look_note
+                  + _refs_note(refs[:5], len(anchor) + 1) + _continuity(i, s, p["scenes"], False) + style)
         s["still_prompt"] = prompt
-        still = await draw(prompt, img_kw, s, f"scene {i + 1}", which="first", prev_url=prev)
+        still = await draw(prompt, img_kw, s, f"scene {i + 1}", which="first")
         if cast:  # a vision check against the sheet; one redraw when the character drifted
             drift = await consistency_issues(cast, still, p)
             if drift:
@@ -833,13 +856,17 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                 fix = prompt + "\nFIX THESE DIFFERENCES FROM THE CHARACTER SHEET: " + "; ".join(drift)
                 still = _url(await _fal(fal_helper.generate_image, key, q["image_model"], fix, **img_kw), "image")
                 s["consistency_fixed"] = drift
-        stills.append(still)
-        board[i]["still_url"] = still
-        await publish()
-        ends.append(await end_frame(i, s))
+        return still
 
     async def scene(i: int, s: dict) -> dict:
-        still = stills[i]
+        async with gate:
+            return await _scene(i, s)
+
+    async def _scene(i: int, s: dict) -> dict:
+        stills[i] = still = await first_frame(i, s)
+        board[i]["still_url"] = still
+        await publish()
+        ends[i] = await end_frame(i, s, still)
         # A last frame very different from the first makes the clip model MORPH one into the other: for a large
         # change the last frame only guides the next scene; the clip performs the action from the prompt.
         end = ends[i] if use_end_frame(s) else None
@@ -1027,6 +1054,10 @@ def splice(film: str, clip: str, a: float, b: float, out: str) -> str:
     if r.returncode != 0:
         raise EngineError(f"Splicing the new scene failed: {(r.stderr or '').strip()[-400:]}")
     return out
+
+
+async def _none() -> None:
+    return None
 
 
 async def all_or_nothing(coros: list) -> list:

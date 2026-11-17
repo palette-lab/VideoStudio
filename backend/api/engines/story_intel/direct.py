@@ -11,7 +11,9 @@ from router_core import registry
 
 FILM_APP = {"flow": "pltt-flow-video-2"}  # the user's own pick; otherwise Storyboard & Video
 DEFAULT_APP = "pltt-storyboard-video-maker"
-CAPS = ["story.multi_scene_storyboard", "story.character_consistency", "video.from_storyboard", "video.image_to_video"]
+CAPS = ["story.multi_scene_storyboard", "story.character_consistency", "video.from_storyboard"]
+# The engine makes its own keyframes; "image_to_video" (which needs the user's image) is claimed only with uploads.
+WITH_IMAGES = ["video.image_to_video"]
 PRODUCTION = {"children_story": ["animation", "narrative"], "fiction": ["narrative"], "puzzle_mystery": ["narrative"],
               "educational": ["explainer"], "documentary": ["documentary"], "product": ["advertisement"],
               "other": ["narrative"]}
@@ -44,11 +46,12 @@ def build(run: dict) -> dict:
     motion = intel.get("mode") == "motion_graphics"
     production = ["explainer", "animation"] if motion else PRODUCTION.get(cls.get("category"), ["narrative"])
     images = [aid for aid, a in (run.get("assets") or {}).items() if a.get("modality") == "image"]
+    caps = CAPS + (WITH_IMAGES if images else [])
     words = run["prompt"].strip()
     brief = (f"{words}\n\nDetailed version of this request (written from the words above; follow it, but the words "
              f"above win wherever they differ):\n{run.get('enhanced_prompt') or ''}")
     what = ("Render the approved full-3D motion graphics film" if motion else "Film the approved story")
-    step = {"step_id": "s1", "app_id": app_id, "subtask_ids": ["t_film"], "capabilities_used": CAPS,
+    step = {"step_id": "s1", "app_id": app_id, "subtask_ids": ["t_film"], "capabilities_used": caps,
             "responsibility": f"{what}: {len(scenes)} scenes, keyframe images -> AI clips (each AI-checked), "
                               "narration, music and finishing - exactly as planned and approved.",
             "inputs": [{"source": "prompt", "format": "text"}]
@@ -68,7 +71,7 @@ def build(run: dict) -> dict:
         "production_type": production, "assumptions": cls.get("assumptions") or [],
         "scene": {"scene_count": len(scenes), "narrative": True},
         "constraints": {"duration_s": dur, "aspect_ratio": ar},
-        "subtasks": [{"id": "t_film", "group": "generate", "description": what, "required_capabilities": CAPS,
+        "subtasks": [{"id": "t_film", "group": "generate", "description": what, "required_capabilities": caps,
                       "basis": "story_intel"}],
         "direct": True, "confidence": 1.0}
     return {"understanding": understanding,

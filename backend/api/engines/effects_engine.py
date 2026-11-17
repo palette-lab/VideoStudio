@@ -11,6 +11,7 @@ them -> one revision if needed -> render the full video.
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -22,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[3]
 TOOL = Path(os.getenv("VIDEO_EFFECTS_DIR", ROOT / "tools" / "vendor-src" / "claude-video-effects"))
 PY = TOOL / ".venv" / "bin" / "python"
 FX = TOOL / "scripts" / "fx.py"
+log = logging.getLogger(__name__)
 
 # Curated for explanation videos: every effect here takes its text from the plan (no built-in branding) and needs no
 # folder of the user's social posts. "face" = needs a person on screen to make sense.
@@ -196,6 +198,8 @@ Rules:
 - TODAY'S EFFECTS: use ONLY these (picked for this film so videos don't all look alike; use a wide mix of them,
   and prefer the less obvious ones when they fit the moment) (name: what it does; options):
 {CATALOG}
+- Numeric options (zoom, speed, spin, size, count, push, scale, x, y, ...) are plain numbers like 1.3 - never words
+  like "in" or "slow"; leave an option out to use its default.
 - {COUNT} effects, each 1.5-4 s long, inside 0..{D} s, not overlapping each other, ordered by start time.
 - Time each effect to the words in the TRANSCRIPT (land a word effect on the moment that word or idea is said). With
   no transcript, spread them over the video's key moments.
@@ -356,9 +360,34 @@ async def _review(shots: list[Path], plan: list[dict]) -> list[str]:
     return [] if data.get("ok") is True and not probs else probs[:8]
 
 
+def _numeric_keys() -> set[str]:
+    """Options fx.py reads as numbers (float(e.o.get('zoom', 1.2)), int(...)), taken from fx.py itself."""
+    try:
+        return set(re.findall(r"(?:float|int)\(\s*e\.o\.get\(\s*'([a-z_]+)'", FX.read_text()))
+    except OSError:
+        return set()
+
+
+def _sanitize(plan: list[dict]) -> list[dict]:
+    """The planner sometimes writes a word where fx.py needs a number ("zoom": "in", "speed": "slow"); one such value
+    crashes the whole render. Drop it so that effect uses its own default."""
+    keys = _numeric_keys()
+    out = []
+    for e in plan:
+        e = dict(e)
+        for k in [k for k in e if k in keys and k not in ("start", "end")]:
+            try:
+                float(e[k])
+            except (TypeError, ValueError):
+                log.info("effects: dropping non-numeric %s=%r on %s", k, e[k], e.get("fx"))
+                e.pop(k)
+        out.append(e)
+    return out
+
+
 async def _render(plan: list[dict], video: str, work: Path) -> Path:
     planf = work / "effects.json"
-    planf.write_text(json.dumps({"effects": plan}, ensure_ascii=False))
+    planf.write_text(json.dumps({"effects": _sanitize(plan)}, ensure_ascii=False))
     out_path = work / "effects.mp4"
     code, out = await _run([str(PY), str(FX), "--plan", str(planf), video, str(out_path)], 2400)
     if code != 0 or not out_path.exists():
