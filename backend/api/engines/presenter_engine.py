@@ -8,21 +8,20 @@ Pipeline:
    product photo, the presenter is generated holding the product.
 3. Voice: the user's own audio file when given, otherwise the script spoken by Kokoro (hexgrad, Apache-2.0) running
    locally on this machine's CPU - free.
-4. Lip-sync: the photo and each audio chunk become a talking video with Ditto (Ant Group, Apache-2.0) running locally
-   (Apple GPU or CPU) - free. Chunks are at most ~27 s, cut at pauses; every chunk starts from the same photo, so the
-   cuts play as the jump cuts creators use, with a punch-in on every other chunk.
+4. Lip-sync: the photo becomes one 10-second "talking to camera" base clip (Kling image-to-video, 720p or more), then
+   every speech chunk (2-10 s, cut at pauses) is lip-synced onto its own window of that clip with Kling LipSync
+   (fal-ai/kling-video/lipsync/audio-to-video), falling back to Sync Lipsync 1.9 (fal-ai/sync-lipsync). The chunks
+   play as the jump cuts creators use, with a punch-in on every other chunk.
 5. The chunks are joined, each with its own audio, so lips and voice stay in sync; Effects Studio then adds
    creator-style effects for the format when no later step does.
 
-Only the presenter photo uses a paid model (Nano Banana Pro on fal, a few cents). Paid voice (ElevenLabs) and paid
-lip-sync on fal (Kling AI Avatar v2, LongCat, InfiniteTalk) are used only when PRESENTER_PAID=on, as fallbacks after
-the local models. The local models live in tools/ (see tools/local_lipsync/README.md).
+Paid on fal: the presenter photo (Nano Banana Pro), the base clip (Kling) and the lip-sync (Kling LipSync, Sync
+Lipsync 1.9). The voice stays local and free (Kokoro); paid voice (ElevenLabs) only when PRESENTER_PAID=on.
 """
 
 import asyncio
 import json
 import logging
-import math
 import os
 import re
 import subprocess
@@ -38,27 +37,21 @@ log = logging.getLogger("palette_video.presenter")
 APP_ID = "palette-presenter-studio"
 ROOT = Path(__file__).resolve().parents[3]
 LOCAL_DIR = Path(os.getenv("PRESENTER_LOCAL_DIR", ROOT / "tools"))
-DITTO_REPO = LOCAL_DIR / "vendor-src" / "ditto-talkinghead"
-LOCAL_PY = DITTO_REPO / ".venv" / "bin" / "python"   # one venv runs both Ditto and Kokoro
-DITTO_RUN = LOCAL_DIR / "local_lipsync" / "ditto_run.py"
+LOCAL_PY = LOCAL_DIR / "vendor-src" / "ditto-talkinghead" / ".venv" / "bin" / "python"   # the venv Kokoro runs in
 KOKORO_RUN = LOCAL_DIR / "local_lipsync" / "kokoro_tts.py"
 KOKORO_MODELS = LOCAL_DIR / "vendor-src" / "kokoro-models"
-LOCAL_DEVICE = os.getenv("PRESENTER_LOCAL_DEVICE", "auto")  # auto (Apple GPU if present) | mps | cpu
 LOCAL_TIMEOUT_S = int(os.getenv("PRESENTER_LOCAL_TIMEOUT", "3600"))
-# Ditto renders at the photo's own size; a smaller photo is much faster on a small Mac and the film is 720p/1080p.
-LOCAL_MAX_SIDE = int(os.getenv("PRESENTER_LOCAL_MAX_SIDE", "1024"))
-# Lip-sync models: the local one first and free; fal's (paid) only with PRESENTER_PAID=on.
+# Lip-sync on fal: video + speech in, the same video with the mouth synced out. Kling first, Sync 1.9 as fallback.
 LIPSYNC = {
-    "ditto_local": {"kind": "local", "label": "Ditto (open source, on this machine)"},
-    "kling_avatar_pro": {"endpoint": "fal-ai/kling-video/ai-avatar/v2/pro", "kind": "fal", "label": "Kling AI Avatar v2 Pro"},
-    "kling_avatar": {"endpoint": "fal-ai/kling-video/ai-avatar/v2/standard", "kind": "fal", "label": "Kling AI Avatar v2"},
-    "longcat": {"endpoint": "fal-ai/longcat-single-avatar/image-audio-to-video", "kind": "open",
-                "label": "LongCat-Video-Avatar (open source, MIT)"},
-    "infinitalk": {"endpoint": "fal-ai/infinitalk", "kind": "open", "label": "InfiniteTalk (open source, Apache-2.0)"},
+    "kling_lipsync": {"endpoint": "fal-ai/kling-video/lipsync/audio-to-video", "label": "Kling LipSync"},
+    "sync_lipsync": {"endpoint": "fal-ai/sync-lipsync", "label": "Sync Lipsync 1.9"},
 }
-INFINITALK_FPS = 25       # InfiniteTalk renders at 25 fps; num_frames 41..721 (~28.8 s)
-LONGCAT_FIRST_S, LONGCAT_SEG_S = 5.8, 5.0   # LongCat: first segment ~5.8 s, each further one ~5 s (max 10)
-CHUNK_MAX_S = 27.0        # every model above takes this in one call
+LIPSYNC_CHAIN = ["kling_lipsync", "sync_lipsync"]
+SYNC_MODEL = "lipsync-1.9.0-beta"
+# Kling LipSync takes a 2-10 s video (720-1920 px a side) and 2-60 s of speech: chunks are 2-10 s, cut at pauses.
+CHUNK_MAX_S = 10.0
+CHUNK_MIN_S = 2.0
+BASE_CLIP_S = 10          # the talking base clip every chunk takes a window of
 VOICES = {"female": os.getenv("PRESENTER_VOICE_FEMALE", "Rachel"), "male": os.getenv("PRESENTER_VOICE_MALE", "Brian")}
 # Kokoro's languages: (words the script's language may start with, espeak language code, female voice, male voice).
 KOKORO_LANGS = [
@@ -73,11 +66,11 @@ KOKORO_LANGS = [
     (("chinese", "mandarin", "zh"), "cmn", "zf_xiaoxiao", "zm_yunxi"),
 ]
 WORDS_PER_S = 2.5
-QUALITY = {
-    "test": {"resolution": "480p", "max_total": 15, "default_total": 12,
-             "paid_lipsync": ["kling_avatar", "longcat", "infinitalk"]},
-    "full": {"resolution": "720p", "max_total": 180, "default_total": 0,  # 0: the format's own default
-             "paid_lipsync": ["kling_avatar_pro", "longcat", "infinitalk"]},
+QUALITY = {  # base clip models: Kling first (720p+ for the lip-sync), Seedance at 720p as the fallback
+    "test": {"resolution": "720p", "max_total": 15, "default_total": 12,
+             "base_models": ["kling_3_0_standard", "seedance_2_0"]},
+    "full": {"resolution": "1080p", "max_total": 180, "default_total": 0,  # 0: the format's own default
+             "base_models": ["kling_3_0_pro", "kling_3_0_standard"]},
 }
 FORMATS = {
     "youtube_explainer": {
@@ -152,9 +145,8 @@ def paid_allowed() -> bool:
 
 
 def local_ready() -> str | None:
-    """None when the local models are installed; otherwise what is missing."""
-    need = {"local Python": LOCAL_PY, "Ditto runner": DITTO_RUN, "Kokoro runner": KOKORO_RUN,
-            "Ditto models": DITTO_REPO / "checkpoints" / "ditto_pytorch" / "models" / "lmdm_v0.4_hubert.pth",
+    """None when the local voice (Kokoro) is installed; otherwise what is missing."""
+    need = {"local Python": LOCAL_PY, "Kokoro runner": KOKORO_RUN,
             "Kokoro model": KOKORO_MODELS / "kokoro-v1.0.int8.onnx"}
     missing = [k for k, v in need.items() if not Path(v).exists()]
     return f"not installed here ({', '.join(missing)} missing)" if missing else None
@@ -162,9 +154,8 @@ def local_ready() -> str | None:
 
 def quality() -> dict:
     q = QUALITY["test"] if story_engine.quality() is story_engine.QUALITY["test"] else QUALITY["full"]
-    chain = ["ditto_local"] + (q["paid_lipsync"] if paid_allowed() else [])
     own = [m.strip() for m in os.getenv("LIPSYNC_MODELS", "").split(",") if m.strip() in LIPSYNC]
-    return {**q, "lipsync": own or chain}
+    return {**q, "lipsync": own or list(LIPSYNC_CHAIN)}
 
 
 async def _subscribe(endpoint: str, args: dict, key: str) -> dict:
@@ -326,12 +317,14 @@ def silences(ff: str, path: str) -> list[float]:
     return out
 
 
-def cut_points(total: float, pauses: list[float], max_s: float = CHUNK_MAX_S) -> list[float]:
+def cut_points(total: float, pauses: list[float], max_s: float = CHUNK_MAX_S,
+               min_s: float = CHUNK_MIN_S) -> list[float]:
     """Where to cut speech of `total` seconds into chunks of at most max_s: at the latest pause in the second half of
-    each window, else hard at max_s. Returns the chunk boundaries, starting with 0 and ending with total."""
+    each window, else hard at max_s, never leaving a last piece shorter than min_s. Returns the chunk boundaries,
+    starting with 0 and ending with total."""
     cuts = [0.0]
     while total - cuts[-1] > max_s:
-        lo, hi = cuts[-1] + max_s * 0.5, cuts[-1] + max_s
+        lo, hi = cuts[-1] + max_s * 0.5, min(cuts[-1] + max_s, total - min_s)
         inside = [p for p in pauses if lo <= p <= hi]
         cuts.append(round(max(inside) if inside else hi, 3))
     cuts.append(round(total, 3))
@@ -354,50 +347,76 @@ async def chunk_audio(path: str, work: Path, tag: str) -> list[str]:
     return out
 
 
-def lipsync_args(model: str, image_url: str, audio_url: str, dur: float, prompt: str, resolution: str) -> dict:
-    """Each model's own request shape, sized to the chunk's speech."""
-    base = {"image_url": image_url, "audio_url": audio_url}
-    if model.startswith("kling_avatar"):
-        return {**base, "prompt": prompt}
-    if model == "longcat":
-        segs = 1 + max(0, math.ceil((dur - LONGCAT_FIRST_S) / LONGCAT_SEG_S))
-        return {**base, "prompt": prompt, "num_segments": min(10, segs), "resolution": resolution}
-    if model == "infinitalk":
-        frames = max(41, min(721, math.ceil(dur * INFINITALK_FPS) + 4))
-        return {**base, "prompt": prompt, "num_frames": frames, "resolution": resolution, "acceleration": "regular"}
+def lipsync_args(model: str, video_url: str, audio_url: str) -> dict:
+    """Each lip-sync model's request: the talking clip and the speech (already the same length)."""
+    if model == "kling_lipsync":
+        return {"video_url": video_url, "audio_url": audio_url}
+    if model == "sync_lipsync":
+        return {"video_url": video_url, "audio_url": audio_url, "model": SYNC_MODEL, "sync_mode": "cut_off"}
     raise PresenterError(f"Unknown lip-sync model {model}.")
 
 
-_LOCAL_LOCK = asyncio.Lock()  # one local render at a time: Ditto needs most of an 8 GB Mac's memory
+def base_prompt(f: dict, setting: str) -> str:
+    """The base clip: the presenter talking to camera in one steady framing (the lip-sync then sets the words)."""
+    return (f"The person talks to the camera the whole time, mouth moving naturally as if speaking, {f['motion']}. "
+            f"{setting} One continuous shot, the same framing throughout, no cuts, no zoom, the face always fully "
+            "visible and facing the camera, nothing covers the mouth. No text, no captions.").replace("  ", " ")
 
 
-async def lipsync(image_url: str, image_path: str, audio: str, prompt: str, q: dict, key: str, out: Path,
-                  on_fallback=None) -> tuple[str, str]:
-    """Talking video file for one chunk: Ditto on this machine first, then (if paid is on) fal's models.
-    Returns (local path, model used)."""
-    dur = await asyncio.to_thread(video_merge.probe_duration, _ffmpeg(), audio)
-    errors, audio_url = [], None
+async def base_clip(app: dict, image_url: str, prompt: str, ar: str, q: dict, key: str, work: Path, progress) -> str:
+    """One talking base clip from the presenter photo (720p or more, as Kling LipSync needs), local file."""
+    errors = []
+    for m in q["base_models"]:
+        try:
+            await progress(f"{app['name']}: filming the presenter ({BASE_CLIP_S} s base clip, {m})")
+            vid = await story_engine._fal(fal_helper.generate_video, key, m, prompt, duration=str(BASE_CLIP_S),
+                                          aspect_ratio=ar, start_image=image_url, audio=False,
+                                          resolution=q["resolution"] if m.startswith("seedance") else None)
+            return await story_engine._download(story_engine._url(vid, "video"), work / "presenter_base.mp4")
+        except Exception as e:  # refused or unavailable: the next model takes over
+            errors.append(f"{m}: {_why(e)}")
+            log.warning("presenter base clip on %s failed: %s", m, e)
+    raise PresenterError("The presenter could not be filmed - " + "; ".join(errors))
+
+
+def window(ff: str, base: str, base_s: float, i: int, need: float, out: str) -> str:
+    """Chunk i's own stretch of the base clip, `need` seconds long (at least 2 s), so the parts don't move alike;
+    re-encoded at 720 px or more on the short side (Kling LipSync's minimum)."""
+    need = max(CHUNK_MIN_S, min(need, base_s))
+    room = max(0.0, base_s - need)
+    start = round((i * 3.7) % (room + 1e-6), 3) if room > 0.05 else 0.0
+    _run([ff, "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{start:.3f}", "-i", base, "-t", f"{need:.3f}",
+          "-an", "-vf", "scale='if(lt(iw,ih),max(720,iw),-2)':'if(lt(iw,ih),-2,max(720,ih))',setsar=1",
+          "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", out], "Cutting the base clip")
+    return out
+
+
+def pad_speech(ff: str, audio: str, dur: float, out: str) -> str:
+    """Speech shorter than the lip-sync minimum gets silence after it (the edit cuts at the speech's real end)."""
+    if dur >= CHUNK_MIN_S + 0.05:
+        return audio
+    _run([ff, "-y", "-hide_banner", "-loglevel", "error", "-i", audio, "-af", f"apad=whole_dur={CHUNK_MIN_S + 0.1}",
+          "-ac", "1", "-ar", "44100", out], "Padding a short line")
+    return out
+
+
+async def lipsync(video: str, audio: str, q: dict, key: str, out: Path, on_fallback=None) -> tuple[str, str]:
+    """Talking video file for one chunk: its window of the base clip lip-synced to its speech, Kling first and
+    Sync Lipsync 1.9 as the fallback. Returns (local path, model used)."""
+    video_url = await story_engine._upload(video)
+    audio_url = await story_engine._upload(audio)
+    errors = []
     for m in q["lipsync"]:
         spec = LIPSYNC[m]
         try:
-            if spec["kind"] == "local":
-                why = local_ready()
-                if why:
-                    raise PresenterError(f"Ditto is {why}")
-                async with _LOCAL_LOCK:
-                    await run_local([LOCAL_PY, DITTO_RUN, "--repo", DITTO_REPO, "--image", image_path,
-                                     "--audio", audio, "--out", out, "--device", LOCAL_DEVICE], "Ditto")
-                return str(out), m
-            audio_url = audio_url or await story_engine._upload(audio)
-            res = await _subscribe(spec["endpoint"], lipsync_args(m, image_url, audio_url, dur, prompt, q["resolution"]), key)
+            res = await _subscribe(spec["endpoint"], lipsync_args(m, video_url, audio_url), key)
             return await story_engine._download(story_engine._url(res, "video"), out), m
-        except Exception as e:  # not installed, unavailable, refused or broken: the next model takes over
+        except Exception as e:  # unavailable, refused or broken: the next model takes over
             errors.append(f"{spec['label']}: {_why(e)}")
             log.warning("lip-sync %s failed: %s", m, e)
             if on_fallback and m != q["lipsync"][-1]:
                 await on_fallback(spec["label"], e)
-    hint = "" if paid_allowed() else " (paid fal models are off; set PRESENTER_PAID=on to fall back to them)"
-    raise PresenterError("Every lip-sync model failed - " + "; ".join(errors) + hint)
+    raise PresenterError("Every lip-sync model failed - " + "; ".join(errors))
 
 
 def fit_clip(ff: str, clip: str, audio: str, out: str, w: int, h: int, punch_in: bool) -> None:
@@ -422,7 +441,6 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
     ar = req.get("aspect_ratio") or None
 
     people, products, refs, own_audio = [], [], [], None
-    local_photo = {}  # uploaded url -> the file on disk
     for aid, a in assets.items():
         if not a.get("path"):
             continue
@@ -432,7 +450,6 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
         elif a.get("modality") == "image":
             await progress(f"{app['name']}: uploading {a['filename']}")
             url = await story_engine._upload(a["path"])
-            local_photo[url] = a["path"]
             refs.append({"role": role, "summary": (a.get("summary") or "")[:400]})
             summary = (a.get("summary") or "").lower()
             if role == "character" or (role == "unclear" and any(w in summary for w in ("person", "man", "woman", "face"))):
@@ -458,13 +475,6 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
             await show({"presenter_url": image_url, "title": script.get("title") or ""})
         except Exception as e:
             log.warning("live update failed: %s", e)
-    image_path = local_photo.get(image_url) or await story_engine._download(image_url, work / "presenter.png")
-    small = work / "presenter_local.png"  # the local lip-sync's input: at most LOCAL_MAX_SIDE px, even sides
-    await asyncio.to_thread(_run, [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", image_path, "-vf",
-                                   f"scale='min({LOCAL_MAX_SIDE},iw)':'min({LOCAL_MAX_SIDE},ih)'"
-                                   ":force_original_aspect_ratio=decrease:force_divisible_by=2", str(small)],
-                            "Preparing the presenter photo")
-    image_path = str(small)
 
     # Speech: the user's recording, or one voice line per segment.
     if own_audio:
@@ -494,20 +504,26 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
             t += d
         chunks, chunk_moods = [c for c, _ in kept], [m for _, m in kept]
 
-    # Lip-sync every chunk from the same photo (local renders one at a time, fal ones in parallel).
+    # The presenter on film: one talking base clip from the photo; every chunk is lip-synced onto its own window of it.
+    if not str(image_url).startswith("http"):
+        image_url = await story_engine._upload(image_url)
+    base = await base_clip(app, image_url, base_prompt(f, str(script.get("setting") or "")), ar, q, key, work, progress)
+    base_s = await asyncio.to_thread(video_merge.probe_duration, ff, base)
+
     n = len(chunks)
     done = [0]
 
     models_used: list[str] = []
 
     async def one(i: int, audio: str, mood: str) -> str:
-        prompt = f"{f['motion']}{', ' + mood if mood else ''}. {script.get('setting') or ''}".strip()
-
         async def fell_back(label, e):
             await progress(f"{app['name']}: part {i + 1}: {label} failed ({_why(e)[:80]}); trying the next model")
 
-        path, used = await lipsync(image_url, image_path, audio, prompt, q, key, work / f"talk_{i + 1:02d}.mp4",
-                                   fell_back)
+        dur = await asyncio.to_thread(video_merge.probe_duration, ff, audio)
+        speech_in = await asyncio.to_thread(pad_speech, ff, audio, dur, str(work / f"speech_in_{i + 1:02d}.wav"))
+        clip_in = await asyncio.to_thread(window, ff, base, base_s, i, max(dur, CHUNK_MIN_S),
+                                          str(work / f"base_{i + 1:02d}.mp4"))
+        path, used = await lipsync(clip_in, speech_in, q, key, work / f"talk_{i + 1:02d}.mp4", fell_back)
         models_used.append(used)
         done[0] += 1
         await progress(f"{app['name']}: lip-sync {done[0]}/{n} done ({LIPSYNC[used]['label']})")
@@ -517,7 +533,7 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
     clips = await asyncio.gather(*(one(i, c, m) for i, (c, m) in enumerate(zip(chunks, chunk_moods))))
 
     await progress(f"{app['name']}: editing")
-    w, h = video_merge.dimensions_for(ar, "1080p" if q["resolution"] == "720p" else "720p")
+    w, h = video_merge.dimensions_for(ar, "1080p" if q["resolution"] == "1080p" else "720p")
     fitted = []
     for i, (clip, audio) in enumerate(zip(clips, chunks)):
         out = str(work / f"fit_{i + 1:02d}.mp4")

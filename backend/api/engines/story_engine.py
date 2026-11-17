@@ -258,7 +258,8 @@ Score below 75 means the plan must be rewritten. Be specific; no generic advice.
 CRITIC_PASS = 75
 
 
-CONSISTENCY = """Image 1 is a film's character sheet. Image 2 is a frame from the film.
+CONSISTENCY = """The first image(s) are a film's character turnaround sheets (each shows one character's face close-up,
+front, side and back views). The LAST image is a frame from the film.
 Compare every character and animal that appears in BOTH: face, hair, wardrobe (colour, cut, length, hood, zips),
 footwear, accessories, and an animal's size, colour and markings. Ignore pose, framing, lighting and background.
 Story bible: {BIBLE}
@@ -480,10 +481,12 @@ async def identity_issues(person_url: str, still_url: str, action: str = "") -> 
     return [] if data.get("same") is True else (diffs or ["a different-looking person"])[:6]
 
 
-async def consistency_issues(cast_url: str, still_url: str, p: dict) -> list[str]:
-    """What a viewer would notice changed between the character sheet and a scene still ([] = consistent)."""
+async def consistency_issues(cast_urls: list[str] | str, still_url: str, p: dict) -> list[str]:
+    """What a viewer would notice changed between the character sheets and a scene still ([] = consistent)."""
+    sheets = [cast_urls] if isinstance(cast_urls, str) else list(cast_urls)
     parts = [{"type": "text", "text": CONSISTENCY.replace("{BIBLE}", json.dumps(p.get("bible") or {}, ensure_ascii=False)[:1500])},
-             {"type": "image_url", "image_url": {"url": cast_url}}, {"type": "image_url", "image_url": {"url": still_url}}]
+             *[{"type": "image_url", "image_url": {"url": u}} for u in sheets],
+             {"type": "image_url", "image_url": {"url": still_url}}]
     try:
         data = await llm.chat_json(config.VISION_MODEL, [{"role": "user", "content": parts}], max_tokens=1500,
                                    reasoning_effort="low", stage="engine.story.consistency")
@@ -575,10 +578,45 @@ def recurring_subject(p: dict) -> bool:
     return bool(str((p.get("bible") or {}).get("characters") or "").strip()) and len(p.get("scenes") or []) > 1
 
 
-CAST_SHEET = ("CHARACTER REFERENCE SHEET for a film. {MASTER} Show every recurring character full body, head to toe, "
-              "standing, facing the camera, in their exact wardrobe and footwear, with any recurring animal or prop at "
-              "its true size beside them. Even soft light, simple background from the film's world, no action, no text."
-              "{STYLE}{LOCKS}")
+# The user's character turnaround template: one sheet per recurring character (a person the user uploaded is drawn
+# from their photo). Four views on a flat grey background give the image and video models the whole person - face,
+# front, side and back - so every scene keeps the same face, body, hair and wardrobe.
+TURNAROUND = ("Character turnaround reference sheet of {CHARACTER}, showing four views side-by-side: a close-up front "
+              "portrait of the face, full-body front view, full-body side profile view, and full-body back view. "
+              "Standing in a neutral relaxed pose, even studio lighting, solid flat mid-gray background, no text, no "
+              "labels, clean sharp focus, {ART_STYLE}.")
+SHEET_AR = "16:9"
+MAX_SHEETS = 3  # each sheet is one more reference image on every still
+
+
+def cast_members(p: dict) -> list[str]:
+    """One description per recurring character (continuity entities first, else the bible's characters text)."""
+    out = []
+    for e in (p.get("continuity") or {}).get("entities") or []:
+        if isinstance(e, dict) and e.get("kind") == "character" and e.get("name"):
+            locked = "; ".join(str(x) for x in (e.get("locked") or [])[:12])
+            out.append(f"{e['name']}" + (f": {locked}" if locked else ""))
+    if not out:
+        chars = (p.get("bible") or {}).get("characters")
+        text = "; ".join(str(x) for x in chars) if isinstance(chars, list) else str(chars or "")
+        if text.strip():
+            out.append(text.strip())
+    return [x[:900] for x in out[:MAX_SHEETS]]
+
+
+def art_style(p: dict) -> str:
+    """[ART STYLE] of the turnaround: the film's locked render style / grade, else photorealistic."""
+    bible = p.get("bible") or {}
+    bits = [str(bible.get(k)).strip() for k in ("grading", "style", "render_style") if bible.get(k)]
+    return ", ".join(bits)[:400] or "photorealistic, true-to-life detail"
+
+
+def turnaround_prompt(character: str, style: str) -> str:
+    return TURNAROUND.replace("{CHARACTER}", character.strip().rstrip(".")).replace("{ART_STYLE}", style.rstrip("."))
+
+
+PHOTO_PERSON = ("the exact person in the reference photo - the same face, apparent age, skin tone, hair and build, "
+                "wearing the outfit from the photo")
 
 
 LOOK_FRAME = ("LOOK FRAME (style reference) for a film. {MASTER} One establishing image of the film's world that fixes "
@@ -620,11 +658,13 @@ def _continuity(i: int, s: dict, scenes: list[dict], has_prev_still: bool) -> st
     return ". ".join(bits) + "."
 
 
-def _cast_note(has_cast: bool) -> str:
-    if not has_cast:
+def _cast_note(sheets: int) -> str:
+    if not sheets:
         return ""
-    return ("\nThe FIRST reference image is the character sheet: every character in this frame has exactly that face, "
-            "hair, wardrobe, footwear and accessories, and every animal or prop that same size, colour and markings.")
+    which = "The FIRST reference image is" if sheets == 1 else f"The FIRST {sheets} reference images are"
+    return (f"\n{which} character turnaround sheet{'s' if sheets > 1 else ''} (face close-up, front, side and back "
+            "views; ignore their grey background and layout): every character in this frame has exactly that face, "
+            "hair, body, wardrobe, footwear and accessories, seen from this shot's angle.")
 
 
 
@@ -746,16 +786,44 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
             log.warning("%s failed: %s", what, e)
             return None
 
-    want_cast = not ref_urls and recurring_subject(p)
-    await progress(f"{app['name']}: locking the look" + (" and drawing the character sheet" if want_cast else "")
+    async def turnaround(character: str, urls: list[str], label: str) -> str | None:
+        """One character turnaround sheet (the user's template); from the user's photo it must still be them."""
+        prompt = turnaround_prompt(character, art_style(p))
+        kw = {"aspect_ratio": SHEET_AR, "num_images": 1} | ({"image_urls": urls} if urls else {})
+        try:
+            url = _url(await _fal(fal_helper.generate_image, key, q["image_model"], prompt, **kw), "image")
+            if urls and person_url:  # drawn from the photo: one redraw when the sheet drifted from the real person
+                drift = await identity_issues(person_url, url)
+                if drift:
+                    await progress(f"{app['name']}: {label} does not match your photo ({drift[0][:80]}), redrawing")
+                    url = _url(await _fal(fal_helper.generate_image, key, q["image_model"], prompt
+                                          + ". FIX: exactly the person in the reference photo; differences to remove: "
+                                          + "; ".join(drift), **kw), "image")
+            return url
+        except Exception as e:  # without it the scenes still share the written look and the references
+            log.warning("%s failed: %s", label, e)
+            return None
+
+    # Every person or animal that recurs gets a turnaround sheet: the user's uploaded person from their photo (it
+    # stands for the first character), the others from the plan's description. A product photo no longer blocks it.
+    members = cast_members(p) if recurring_subject(p) or person_url else []
+    jobs = []
+    if person_url:
+        jobs.append(turnaround(PHOTO_PERSON, [person_url], "your person's turnaround sheet"))
+        members = members[1:]
+    jobs += [turnaround(m, [], f"character turnaround sheet {n}") for n, m in enumerate(members, start=1)]
+    jobs = jobs[:MAX_SHEETS]
+    await progress(f"{app['name']}: locking the look"
+                   + (f" and drawing {len(jobs)} character turnaround sheet{'s' if len(jobs) > 1 else ''}" if jobs else "")
                    + " before the scenes")
-    cast, look = await asyncio.gather(sheet(CAST_SHEET, "character sheet", []) if want_cast else _none(),
-                                      sheet(LOOK_FRAME, "look frame", ref_urls[:3]))
-    if cast:
-        p["cast_sheet_url"] = cast
+    *sheets, look = await asyncio.gather(*jobs, sheet(LOOK_FRAME, "look frame", ref_urls[:3]))
+    casts = [u for u in sheets if u]
+    cast = casts[0] if casts else None
+    if casts:
+        p["cast_sheet_url"], p["cast_sheets"] = cast, casts
     if look:
         p["look_frame_url"] = look
-    anchor = [u for u in (cast, look) if u]
+    anchor = [*casts, *([look] if look else [])]
     look_note = (f"\nReference image {len(anchor)} is the film's LOOK FRAME: the same world - setting, background, "
                  "materials, light, colour palette and grade, render style - in this shot, unless this scene's plan "
                  "moves to a new place." if look else "")
@@ -832,25 +900,27 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
             log.warning("end frame for scene %s failed: %s", i + 1, e)
             return None
 
-    # Every scene at the same time: its first frame from the locked look (character sheet, look frame, the user's
-    # references), then its last frame, then its clip. Continuity between scenes comes from the shared anchors and
-    # the written link to the previous scene, not from waiting for the previous scene's image.
+    # One continuous film, not a row of jump cuts: the FRAMES are drawn in story order - each scene's first frame from
+    # the locked look (turnaround sheets, look frame, the user's references) AND the previous scene's last frame, so
+    # scene i+1 starts exactly where scene i ended (same people, props, place and light, the action carried on). The
+    # CLIPS, the slow part, still render side by side: each starts as soon as its own frames are ready.
     stills: list[str | None] = [None] * len(p["scenes"])
     ends: list[str | None] = [None] * len(p["scenes"])
     gate = asyncio.Semaphore(PARALLEL_SCENES)
+    ready: list[asyncio.Future] = [asyncio.get_running_loop().create_future() for _ in p["scenes"]]
 
-    async def first_frame(i: int, s: dict) -> str:
+    async def first_frame(i: int, s: dict, prev_end: str | None = None) -> str:
         await progress(f"{app['name']}: scene {i + 1}/{len(p['scenes'])} still")
         img_kw = {"aspect_ratio": ar, "num_images": 1}
-        urls = anchor + ref_urls[:5]
+        urls = anchor + ref_urls[:5] + ([prev_end] if prev_end else [])  # the previous last frame goes LAST
         if urls:
             img_kw["image_urls"] = urls
-        prompt = (s["image_prompt"] + props_line(s) + _cast_note(bool(cast)) + look_note
-                  + _refs_note(refs[:5], len(anchor) + 1) + _continuity(i, s, p["scenes"], False) + style)
+        prompt = (s["image_prompt"] + props_line(s) + _cast_note(len(casts)) + look_note
+                  + _refs_note(refs[:5], len(anchor) + 1) + _continuity(i, s, p["scenes"], bool(prev_end)) + style)
         s["still_prompt"] = prompt
         still = await draw(prompt, img_kw, s, f"scene {i + 1}", which="first")
-        if cast:  # a vision check against the sheet; one redraw when the character drifted
-            drift = await consistency_issues(cast, still, p)
+        if casts:  # a vision check against the sheets; one redraw when a character drifted
+            drift = await consistency_issues(casts, still, p)
             if drift:
                 await progress(f"{app['name']}: scene {i + 1} drifted from the character sheet ({drift[0][:80]}), redrawing")
                 fix = prompt + "\nFIX THESE DIFFERENCES FROM THE CHARACTER SHEET: " + "; ".join(drift)
@@ -858,15 +928,30 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                 s["consistency_fixed"] = drift
         return still
 
+    async def chain() -> None:
+        """The frames in story order; scene i's clip may start the moment its frames are set."""
+        prev_end = None
+        try:
+            for i, s in enumerate(p["scenes"]):
+                stills[i] = still = await first_frame(i, s, prev_end)
+                board[i]["still_url"] = still
+                await publish()
+                ends[i] = await end_frame(i, s, still)
+                prev_end = ends[i]  # no planned end: the next scene leans on the shared look and the written link
+                ready[i].set_result(None)
+        except BaseException as e:  # the clips still waiting stop too
+            for f in ready:
+                if not f.done():
+                    f.set_exception(e if isinstance(e, Exception) else asyncio.CancelledError())
+            raise
+
     async def scene(i: int, s: dict) -> dict:
+        await ready[i]
         async with gate:
             return await _scene(i, s)
 
     async def _scene(i: int, s: dict) -> dict:
-        stills[i] = still = await first_frame(i, s)
-        board[i]["still_url"] = still
-        await publish()
-        ends[i] = await end_frame(i, s, still)
+        still = stills[i]
         # A last frame very different from the first makes the clip model MORPH one into the other: for a large
         # change the last frame only guides the next scene; the clip performs the action from the prompt.
         end = ends[i] if use_end_frame(s) else None
@@ -899,7 +984,7 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                 "motion_prompt": s.get("motion_prompt") or "", "props": s.get("props") or "",
                 "qa": s.get("qa") or {}, "clip_url": clip, "model": used, "path": path}
 
-    done = await all_or_nothing([scene(i, s) for i, s in enumerate(p["scenes"])])
+    done = (await all_or_nothing([chain(), *[scene(i, s) for i, s in enumerate(p["scenes"])]]))[1:]
     await progress(f"{app['name']}: joining {len(done)} clips")
     final = await join([d["path"] for d in done], work / "final.mp4", ar, q["resolution"])
     if any(vo_files):

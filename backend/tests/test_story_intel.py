@@ -147,8 +147,8 @@ def test_pdf_text_is_read(tmp_path):
 
 def mg_scene(n, line="Your brain spends money before you do.", words="spends money"):
     return {"n": n, "beat": f"B{n:02d}", "script_line": line, "duration_s": 5, "visual_concept": f"concept {n}",
-            "hero_subject": "a chrome piggy bank", "keyframe_prompt": "a chrome piggy bank on a paper grid " * 8,
-            "typography_text": words, "typography_style": "extruded black sans", "three_d_elements": "chrome, glass",
+            "hero_subject": "a ceramic piggy bank", "keyframe_prompt": "a matte ceramic piggy bank on a paper grid " * 8,
+            "typography_text": words, "typography_style": "extruded black sans", "three_d_elements": "glazed ceramic, paper",
             "graphic_elements": "dashed lines", "composition": "hero centre, type top third", "lighting": "soft key",
             "color": "palette 1", "method": "both", "end_frame": "the bank tilts left",
             "motion": {"hero_object_motion": "the bank rotates 30 degrees and coins rise " * 3, "camera": f"dolly-in {n}",
@@ -172,6 +172,14 @@ def test_motion_director_output_becomes_a_story_plan():
     bad = motion.to_plan({**raw, "scenes": [mg_scene(1, " ".join(["word"] * 16), "not in line here at all")]})
     found = " ".join(i["problem"] for i in motion.lint(bad))
     assert "16 words" in found and "over 4 words" in found and "not taken from the line" in found
+    # Realistic look: glass / chrome / marble are flagged for revision unless the user asked for them.
+    shiny = mg_scene(1)
+    shiny["keyframe_prompt"] = "a clear glass brain with a polished chrome arm on a marble plinth"
+    glassy = motion.to_plan({**raw, "scenes": [shiny]})
+    found = " ".join(i["problem"] for i in motion.lint(glassy))
+    assert "stylised materials" in found and "glass" in found and "chrome" in found and "marble" in found
+    assert motion.lint(glassy, stylized_ok=True) == []
+    assert motion.wants_stylized("a glass brain ad") and not motion.wants_stylized("how habits form in the brain")
     block = json.loads(story_intel.engine_block({"mode": "motion_graphics", "plan": plan}))
     assert block["mode"].startswith("full 3D motion graphics") and block["scenes"][0]["keyframe_prompt"]
     assert block["scenes"][0]["in_scene_text"] == "spends money" and "INSIDE the keyframe" in block["mode"]
@@ -201,11 +209,16 @@ def test_motion_route_topic_ideas_and_palette_switch(monkeypatch):
         return {"title": "t", "palette": {"option": 3}, "script": "Your brain spends money before you do.",
                 "scenes": [mg_scene(1)]}
     monkeypatch.setattr(story_intel.llm, "chat_json", fake2)
+    own = {"1": {"name": "Ink", "spec": "a", "hex": ["#111111"]}, "2": {"name": "Paper", "spec": "b", "hex": []},
+           "3": {"name": "Rust", "spec": "c", "hex": ["#B4532A"]}}
     intel = {"mode": "motion_graphics", "classification": {"category": "educational", "duration_s": 5},
-             "plan": {"motion_graphics": {"script": "Your brain spends money before you do."}}}
+             "plan": {"motion_graphics": {"script": "Your brain spends money before you do.", "palette_specs": own,
+                                          "art_direction": {"name": "Workshop"}}}}
     asyncio.run(story_intel.switch_palette(intel, 3, "why we overspend"))
-    assert "LOCKED by the user: option 3" in seen["system"] and "KEEP THIS APPROVED SCRIPT" in seen["user"]
-    assert intel["plan"]["motion_graphics"]["palette"]["option"] == 3
+    assert "LOCKED by the user: option 3 (Rust)" in seen["system"] and "KEEP THIS APPROVED SCRIPT" in seen["user"]
+    assert "KEEP THIS ART DIRECTION" in seen["user"] and "Workshop" in seen["user"]
+    mg = intel["plan"]["motion_graphics"]
+    assert mg["palette"]["option"] == 3 and mg["palettes"][3] == "Rust" and mg["art_direction"]["name"] == "Workshop"
     with pytest.raises(ValueError):
         asyncio.run(story_intel.switch_palette(intel, 7, "x"))
 
@@ -221,6 +234,31 @@ def test_director_uses_the_users_master_prompt_verbatim_plus_full_3d():
                  "3D letters", "- Storyboard & Video: ...", "Target 30 seconds"):
         assert must in system
     assert "{APPS}" not in system and "{LENGTH}" not in system and "{PALETTE_RULE}" not in system
+    assert "{STYLES}" not in system and "DIFFERENT FOR EVERY VIDEO" in system and "REALISTIC LOOK" in system
+
+
+def test_each_video_gets_its_own_art_direction_and_palettes():
+    from engines.story_intel import motion
+    # Different runs are offered different style families, so the looks do not repeat.
+    offered = {tuple(motion.style_options()) for _ in range(20)}
+    assert len(offered) > 10 and all(len(x) == 4 for x in offered)
+    raw = {"title": "Coffee", "script": "Your brain spends money before you do.",
+           "art_direction": {"name": "Roastery tabletop", "concept": "coffee's real world", "set": "burlap and wood",
+                             "materials": "real beans, enamel mugs", "typography": "stencil slab in matte paint"},
+           "palettes": [{"name": "Dark Roast", "spec": "espresso brown", "hex": ["#2B1A12", "#C8873A", "#F3E9DC"]},
+                        {"name": "Crema", "spec": "cream and caramel", "hex": ["#F3E9DC", "#B5651D", "not-a-hex"]},
+                        {"name": "Origin Green", "spec": "leaf green", "hex": ["#1F3B2D", "#E4D6A7"]}],
+           "palette": {"option": 2, "why": "warm"}, "scenes": [mg_scene(1)]}
+    plan = motion.to_plan(raw)
+    mg = plan["motion_graphics"]
+    assert mg["palettes"] == {1: "Dark Roast", 2: "Crema", 3: "Origin Green"}
+    assert mg["palette_swatches"][2] == ["#F3E9DC", "#B5651D"]  # bad HEX dropped
+    assert "Crema" in plan["style"]["look"] and "Roastery tabletop" in plan["style"]["look"]
+    assert "Roastery tabletop" in plan["style"]["visual_style"]
+    kept = motion.keep_style(json.loads(json.dumps(plan)))  # survives the JSON round trip of the run store
+    assert kept["palettes"][3]["name"] == "Origin Green" and kept["art_direction"]["name"] == "Roastery tabletop"
+    # No palettes from the director: the original three are the fallback.
+    assert motion.to_plan({**raw, "palettes": []})["motion_graphics"]["palettes"][1] == "Signature Editorial"
 
 
 def test_scene_checks_verify_the_3d_words():
@@ -228,3 +266,23 @@ def test_scene_checks_verify_the_3d_words():
     spec = se._qa_spec({"title": "B01", "in_scene_text": "spends money", "start_state": "a chrome piggy bank"}, "first")
     assert "spends money" in spec and "spelled exactly" in spec
     assert "misspelled" in se.SCENE_QA and "re-spell" in se.CLIP_QA
+
+
+def test_3d_motion_video_mode_forces_the_3d_director_for_any_topic(monkeypatch):
+    from router_core import pipeline
+    stages = []
+
+    async def fake(model, messages, **kw):
+        stages.append(kw["stage"])
+        if kw["stage"] == "story.classify":  # a cooking topic the classifier would normally film as live action
+            return {"category": "other", "agent": "food", "production": "cinematic", "has_topic": True,
+                    "research": "none", "duration_s": 20}
+        if kw["stage"] == "story.motion_director":
+            return {"needs_topic": True, "topic_ideas": ["a", "b", "c", "d", "e"]}
+        raise AssertionError(kw["stage"])
+    monkeypatch.setattr(story_intel.llm, "chat_json", fake)
+    intel = asyncio.run(story_intel.develop("how sourdough rises", force_motion=True))
+    assert intel["mode"] == "motion_graphics" and stages == ["story.classify", "story.motion_director"]
+    assert pipeline.APP_MODES["motion3d"] == "pltt-storyboard-video-maker"
+    stages.clear()  # without the mode the food agent keeps the cooking film
+    assert asyncio.run(story_intel.develop("how sourdough rises")).get("skipped") and stages == ["story.classify"]

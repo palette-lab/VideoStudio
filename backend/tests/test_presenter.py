@@ -43,16 +43,17 @@ async def test_presenter_mode_makes_any_request_a_talking_presenter():
 
 
 def test_cut_points_cut_long_speech_at_pauses_under_the_limit():
-    cuts = pe.cut_points(70.0, [5.0, 14.2, 22.9, 26.1, 40.0, 51.3, 60.0])
-    assert cuts[0] == 0 and cuts[-1] == 70.0
-    assert all(b - a <= pe.CHUNK_MAX_S for a, b in zip(cuts, cuts[1:]))
-    assert 26.1 in cuts  # the latest pause inside the first window
+    cuts = pe.cut_points(30.0, [3.0, 7.2, 9.4, 14.0, 18.1, 26.5])
+    assert cuts[0] == 0 and cuts[-1] == 30.0
+    assert all(pe.CHUNK_MIN_S <= b - a <= pe.CHUNK_MAX_S for a, b in zip(cuts, cuts[1:]))
+    assert 9.4 in cuts  # the latest pause inside the first window
 
 
-def test_cut_points_hard_cut_without_pauses_and_none_when_short():
-    assert pe.cut_points(20.0, []) == [0.0, 20.0]
-    cuts = pe.cut_points(60.0, [])
-    assert cuts == [0.0, pe.CHUNK_MAX_S, pe.CHUNK_MAX_S * 2, 60.0]
+def test_cut_points_hard_cut_without_pauses_and_never_a_tiny_last_piece():
+    assert pe.cut_points(8.0, []) == [0.0, 8.0]
+    assert pe.cut_points(30.0, []) == [0.0, 10.0, 20.0, 30.0]
+    cuts = pe.cut_points(20.5, [])  # a hard cut at 20 s would leave 0.5 s, below Kling LipSync's 2 s
+    assert cuts[-1] == 20.5 and all(b - a >= pe.CHUNK_MIN_S for a, b in zip(cuts, cuts[1:]))
 
 
 def test_format_detection():
@@ -61,74 +62,106 @@ def test_format_detection():
     assert pe.detect_format("a customer testimonial") == "testimonial"
 
 
-def test_free_by_default_paid_only_when_switched_on(monkeypatch):
-    monkeypatch.delenv("PRESENTER_PAID", raising=False)
+def test_lipsync_is_kling_then_sync_1_9_no_local_model(monkeypatch):
     monkeypatch.delenv("LIPSYNC_MODELS", raising=False)
-    assert pe.quality()["lipsync"] == ["ditto_local"]
-    monkeypatch.setenv("PRESENTER_PAID", "on")
-    chain = pe.quality()["lipsync"]
-    assert chain[0] == "ditto_local" and len(chain) > 1 and all(pe.LIPSYNC[m]["kind"] != "local" for m in chain[1:])
+    monkeypatch.delenv("PRESENTER_PAID", raising=False)
+    assert pe.quality()["lipsync"] == ["kling_lipsync", "sync_lipsync"]
+    assert pe.LIPSYNC["kling_lipsync"]["endpoint"] == "fal-ai/kling-video/lipsync/audio-to-video"
+    assert pe.LIPSYNC["sync_lipsync"]["endpoint"] == "fal-ai/sync-lipsync"
+    assert set(pe.LIPSYNC) == {"kling_lipsync", "sync_lipsync"}
 
 
 def test_lipsync_request_shapes_fit_each_model():
-    a = pe.lipsync_args("longcat", "img", "aud", 20.0, "talk", "480p")
-    assert a["num_segments"] == 4 and a["resolution"] == "480p"  # 5.8 + 3 x 5 s covers 20 s
-    a = pe.lipsync_args("infinitalk", "img", "aud", 27.0, "talk", "720p")
-    assert 41 <= a["num_frames"] <= 721
-    a = pe.lipsync_args("kling_avatar", "img", "aud", 10.0, "talk", "480p")
-    assert set(a) == {"image_url", "audio_url", "prompt"}
+    assert pe.lipsync_args("kling_lipsync", "v", "a") == {"video_url": "v", "audio_url": "a"}
+    a = pe.lipsync_args("sync_lipsync", "v", "a")
+    assert a == {"video_url": "v", "audio_url": "a", "model": "lipsync-1.9.0-beta", "sync_mode": "cut_off"}
 
 
 def _fake_media(monkeypatch, tmp_path):
     async def fake_upload(path):
-        return "https://x/a.wav"
+        return f"https://x/{path.rsplit('/', 1)[-1]}"
 
     async def fake_download(url, dest):
         return str(dest)
 
     monkeypatch.setattr(pe.story_engine, "_upload", fake_upload)
     monkeypatch.setattr(pe.story_engine, "_download", fake_download)
-    monkeypatch.setattr(pe, "_ffmpeg", lambda: "ffmpeg")
-    monkeypatch.setattr(pe.video_merge, "probe_duration", lambda ff, p: 8.0)
 
 
-async def test_local_ditto_runs_first(monkeypatch, tmp_path):
+async def test_kling_lipsync_runs_first_with_the_video_and_speech(monkeypatch, tmp_path):
     _fake_media(monkeypatch, tmp_path)
-    ran = []
-
-    async def fake_local(cmd, what, timeout=0):
-        ran.append(what)
-        return {"ok": True}
-
-    monkeypatch.setattr(pe, "local_ready", lambda: None)
-    monkeypatch.setattr(pe, "run_local", fake_local)
-    path, used = await pe.lipsync("u", "img.png", "a.wav", "talk", {"lipsync": ["ditto_local", "kling_avatar"],
-                                                                     "resolution": "480p"}, "k", tmp_path / "t.mp4")
-    assert used == "ditto_local" and ran == ["Ditto"] and path.endswith("t.mp4")
-
-
-async def test_without_local_models_and_paid_off_it_says_what_to_do(monkeypatch, tmp_path):
-    _fake_media(monkeypatch, tmp_path)
-    monkeypatch.delenv("PRESENTER_PAID", raising=False)
-    monkeypatch.setattr(pe, "local_ready", lambda: "not installed here (Ditto models missing)")
-    with pytest.raises(pe.PresenterError, match="PRESENTER_PAID=on"):
-        await pe.lipsync("u", "img.png", "a.wav", "talk", pe.quality(), "k", tmp_path / "t.mp4")
-
-
-async def test_paid_fal_lipsync_is_the_fallback_when_switched_on(monkeypatch, tmp_path):
-    _fake_media(monkeypatch, tmp_path)
-    monkeypatch.setenv("PRESENTER_PAID", "on")
-    monkeypatch.setattr(pe, "local_ready", lambda: "not installed here")
     calls = []
 
     async def fake_subscribe(endpoint, args, key):
-        calls.append(endpoint)
+        calls.append((endpoint, args))
         return {"video": {"url": "https://x/v.mp4"}}
 
     monkeypatch.setattr(pe, "_subscribe", fake_subscribe)
-    q = pe.quality()
-    path, used = await pe.lipsync("u", "img.png", "a.wav", "talk", q, "k", tmp_path / "t.mp4")
-    assert used == q["lipsync"][1] and calls == [pe.LIPSYNC[used]["endpoint"]]
+    path, used = await pe.lipsync("/w/base_01.mp4", "/w/a.wav", pe.quality(), "k", tmp_path / "t.mp4")
+    assert used == "kling_lipsync" and path.endswith("t.mp4")
+    assert calls == [("fal-ai/kling-video/lipsync/audio-to-video",
+                      {"video_url": "https://x/base_01.mp4", "audio_url": "https://x/a.wav"})]
+
+
+async def test_sync_lipsync_1_9_is_the_fallback(monkeypatch, tmp_path):
+    _fake_media(monkeypatch, tmp_path)
+    calls, fell = [], []
+
+    async def fake_subscribe(endpoint, args, key):
+        calls.append(endpoint)
+        if "kling" in endpoint:
+            raise RuntimeError("video must be 720p")
+        return {"video": {"url": "https://x/v.mp4"}}
+
+    async def on_fallback(label, e):
+        fell.append(label)
+
+    monkeypatch.setattr(pe, "_subscribe", fake_subscribe)
+    path, used = await pe.lipsync("/w/b.mp4", "/w/a.wav", pe.quality(), "k", tmp_path / "t.mp4", on_fallback)
+    assert used == "sync_lipsync" and calls == ["fal-ai/kling-video/lipsync/audio-to-video", "fal-ai/sync-lipsync"]
+    assert fell == ["Kling LipSync"]
+
+    async def broken(endpoint, args, key):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(pe, "_subscribe", broken)
+    with pytest.raises(pe.PresenterError, match="Every lip-sync model failed"):
+        await pe.lipsync("/w/b.mp4", "/w/a.wav", pe.quality(), "k", tmp_path / "t.mp4")
+
+
+async def test_base_clip_films_the_presenter_from_the_photo(monkeypatch, tmp_path):
+    _fake_media(monkeypatch, tmp_path)
+    seen = []
+
+    async def fake_fal(fn, key, model, prompt, **kw):
+        seen.append((model, kw))
+        if model == "kling_3_0_pro":
+            raise RuntimeError("refused")
+        return {"video": {"url": "https://x/base.mp4"}}
+
+    async def progress(m):
+        pass
+
+    monkeypatch.setattr(pe.story_engine, "_fal", fake_fal)
+    q = {**pe.QUALITY["full"], "lipsync": pe.LIPSYNC_CHAIN}
+    out = await pe.base_clip({"name": "P"}, "https://x/p.png", "talks", "9:16", q, "k", tmp_path, progress)
+    assert out.endswith("presenter_base.mp4") and [m for m, _ in seen] == ["kling_3_0_pro", "kling_3_0_standard"]
+    kw = seen[-1][1]
+    assert kw["start_image"] == "https://x/p.png" and kw["duration"] == "10" and kw["audio"] is False
+    assert "mouth moving" in pe.base_prompt(pe.FORMATS["ugc_ad"], "in a kitchen")
+
+
+def test_each_part_gets_its_own_window_of_the_base_clip(monkeypatch):
+    runs = []
+    monkeypatch.setattr(pe, "_run", lambda cmd, what: runs.append(cmd))
+    for i in range(3):
+        pe.window("ffmpeg", "base.mp4", 10.0, i, 4.0, f"w{i}.mp4")
+    starts = [float(c[c.index("-ss") + 1]) for c in runs]
+    durs = [float(c[c.index("-t") + 1]) for c in runs]
+    assert len(set(starts)) == 3 and all(s + 4.0 <= 10.0 for s in starts) and durs == [4.0, 4.0, 4.0]
+    runs.clear()
+    pe.window("ffmpeg", "base.mp4", 10.0, 0, 0.8, "w.mp4")  # never under the lip-sync's 2 s minimum
+    assert float(runs[0][runs[0].index("-t") + 1]) == 2.0
 
 
 def test_kokoro_voices_by_language():

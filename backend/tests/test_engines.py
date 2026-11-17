@@ -52,17 +52,22 @@ def test_engine_plans_makes_stills_clips_and_joins(app_id, tmp_path, monkeypatch
 
     def fake_image(key, model, prompt, **kw):
         seen["images"] += 1
+        if prompt.startswith("Character turnaround reference sheet of girl, 10, red coat"):  # the user's template
+            assert kw["aspect_ratio"] == "16:9" and "full-body side profile view" in prompt
+            assert "solid flat mid-gray background" in prompt and "image_urls" not in kw
+            seen["sheet"] = True
+            return {"images": [{"url": "https://fal.media/sheet.png"}]}
+        if prompt.startswith("LOOK FRAME"):  # the film's world, drawn once beside the sheet
+            seen["look"] = True
+            return {"images": [{"url": "https://fal.media/look.png"}]}
         assert "GLOBAL STYLE" in prompt and kw["aspect_ratio"] == "9:16"
         if prompt.startswith("The LAST frame"):
             seen["end"] = "https://fal.media/end1.png"
             return {"images": [{"url": seen["end"]}]}
         if seen.get("end") and "girl hugs cat" in prompt:  # scene 2 starts from scene 1's LAST frame
             seen["chained"] = kw["image_urls"][-1] == seen["end"]
-        if prompt.startswith("CHARACTER REFERENCE SHEET"):
-            seen["sheet"] = True
-            return {"images": [{"url": "https://fal.media/sheet.png"}]}
-        if seen.get("sheet"):  # every scene still is made from the character sheet
-            assert kw["image_urls"][0] == "https://fal.media/sheet.png" and "character sheet" in prompt
+        if seen.get("sheet"):  # every scene still is made from the turnaround sheet
+            assert kw["image_urls"][0] == "https://fal.media/sheet.png" and "turnaround sheet" in prompt
         return {"images": [{"url": f"https://fal.media/still{seen['images']}.png"}]}
 
     def fake_video(key, model, prompt, **kw):
@@ -101,8 +106,9 @@ def test_engine_plans_makes_stills_clips_and_joins(app_id, tmp_path, monkeypatch
     if app_id == "pltt-flow-video-2":
         assert "ENGINES (the models that render this film" in seen["system"]
     assert seen.get("chained") is True
-    # the sheet, one still per scene, one last frame, and one redraw after the AI check found an extra plate
-    assert seen["images"] == 5 and seen["sheet"] and len(out["scenes"]) == 2
+    # the sheet, the look frame, one still per scene, one last frame, and one redraw after the AI check found an
+    # extra plate
+    assert seen["images"] == 6 and seen["sheet"] and seen["look"] and len(out["scenes"]) == 2
     assert seen["qa"] == 4  # every frame analysed (3) plus the redraw re-checked
     assert out["scenes"][0]["qa"]["first"] == {"issues": [], "redrawn": True,
                                                "fixed": ["an extra plate on the table -> remove it"]}
@@ -295,3 +301,20 @@ def test_large_change_does_not_morph_and_retake_lists_the_problems():
     s = {"action": "0-3 s: the hare sprints", "image_prompt": "hare"}
     retake = se._motion("pltt-storyboard-video-maker", s, q, fix="the hare turns into a second hare")
     assert "AVOID" in retake and "second hare" in retake and "AVOID" not in se._motion("x", s, q)
+
+
+def test_turnaround_sheet_uses_the_users_template_per_character():
+    p = {"bible": {"characters": "unused", "grading": "warm 35mm film look"},
+         "continuity": {"entities": [{"kind": "character", "name": "Mina", "locked": ["30s", "short black bob", "navy suit"]},
+                                     {"kind": "prop", "name": "mug"},
+                                     {"kind": "character", "name": "Leo", "locked": ["10", "red raincoat"]}]}}
+    members = story_engine.cast_members(p)
+    assert members == ["Mina: 30s; short black bob; navy suit", "Leo: 10; red raincoat"]
+    prompt = story_engine.turnaround_prompt(members[0], story_engine.art_style(p))
+    assert prompt == ("Character turnaround reference sheet of Mina: 30s; short black bob; navy suit, showing four views "
+                      "side-by-side: a close-up front portrait of the face, full-body front view, full-body side profile "
+                      "view, and full-body back view. Standing in a neutral relaxed pose, even studio lighting, solid "
+                      "flat mid-gray background, no text, no labels, clean sharp focus, warm 35mm film look.")
+    assert story_engine.cast_members({"bible": {"characters": "a girl, 10, red coat"}}) == ["a girl, 10, red coat"]
+    assert story_engine.art_style({}) == "photorealistic, true-to-life detail"
+    assert "FIRST 2 reference images are character turnaround sheets" in story_engine._cast_note(2)

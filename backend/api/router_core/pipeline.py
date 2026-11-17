@@ -16,7 +16,9 @@ SEGMENTS_KEEP = "Keep them as separate segments (not possible yet)"
 
 # One-app modes: the user picks the app; the AI still reads the request and plans, but only for that app.
 APP_MODES = {"storyboard": "pltt-storyboard-video-maker", "flow": "pltt-flow-video-2", "motion": "palette-motion-studio",
-             "presenter": "palette-presenter-studio"}
+             "presenter": "palette-presenter-studio",
+             # 3D Motion Video: the 3D Motion Graphics Director plans it (any topic), Storyboard & Video renders it.
+             "motion3d": "pltt-storyboard-video-maker"}
 
 GROUP_LABEL = {"reference": "understands the reference", "generate": "produces the footage",
                "motion": "adds the programmatic animation", "edit": "edits and finishes the video",

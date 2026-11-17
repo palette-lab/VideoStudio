@@ -47,7 +47,7 @@ router = PluginRouter(tags=["palette-video"])
 
 READ = [require_permission("resources:read")]
 WRITE = [require_permission("resources:write")]
-MODES = {"auto", "normal", "hybrid", "analyze", "storyboard", "flow", "motion", "presenter"}
+MODES = {"auto", "normal", "hybrid", "analyze", "storyboard", "flow", "motion", "presenter", "motion3d"}
 BUSY = {"analyzing", "approved", "executing"}
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 EXT_MODALITY = {".jpg": "image", ".jpeg": "image", ".png": "image", ".webp": "image", ".heic": "image",
@@ -739,7 +739,7 @@ async def _story_intelligence(ctx: PluginContext, run: dict) -> bool:
     run.pop("pending_topic", None)
     try:
         intel = await story_intel.develop(_story_prompt(run), files, docs, st.get("duration_s"),
-                                          st.get("aspect_ratio"), progress)
+                                          st.get("aspect_ratio"), progress, force_motion=run["mode"] == "motion3d")
     except (llm.LLMError, ValueError, KeyError, TypeError) as e:
         log.warning("story intelligence failed for %s: %s", run["id"], e)
         _event(run, f"Story intelligence unavailable ({str(e)[:100]}); using the prompt enhancer")
@@ -1094,7 +1094,7 @@ async def rerun(run_id: str, body: Rerun, ctx: PluginContext = Depends(get_plugi
         raise HTTPException(409, "Wait until this run has finished.")
     label = {"analyze": "AI Analyze", "hybrid": "Hybrid", "normal": "Normal", "auto": "Auto", "storyboard": "Storyboard",
              "flow": "Flow Video", "motion": "Motion Video",
-             "presenter": "Presenter"}[body.mode]
+             "presenter": "Presenter", "motion3d": "3D Motion Video"}[body.mode]
     run = _new_run(old["prompt"], body.mode, str(ctx.user_id), message=f"Think again in {label} mode.",
                    conversation_id=old.get("conversation_id") or old["id"])
     run.update(parent_run=run_id, answers=dict(old.get("answers", {})), settings=dict(old.get("settings") or {}),

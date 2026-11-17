@@ -18,23 +18,48 @@ regenerates a scene, then approves the render.
 """
 
 import json
+import random
+import re
 from pathlib import Path
 
+# Fallback only: used when the director returns no palettes of its own. Every video normally gets three palette
+# directions invented for its topic (Stage 3), so no two videos share one fixed look.
 PALETTES = {
-    1: {"name": "Signature Editorial",
+    1: {"name": "Signature Editorial", "hex": ["#F4EFE6", "#4B2A91", "#141414"],
         "spec": "warm off-white paper background (#F4EFE6) with a fine grey dashed grid (#CFC8BC); deep royal purple "
                 "accents (#4B2A91, #6C3FD1); bold black (#141414) and purple typography; soft editorial shadows; "
                 "premium photographic and 3D elements; exactly two faint diagonal background lines in low-contrast "
                 "purple-grey"},
-    2: {"name": "Dark Technical Minimal",
+    2: {"name": "Dark Technical Minimal", "hex": ["#151A21", "#14E0C8", "#F5F7FA"],
         "spec": "slate / charcoal background (#151A21, #1E252E); neon teal and cyan accents (#14E0C8, #2BC8F2); subtle "
-                "luminous atmosphere; crisp white (#F5F7FA) and teal typography; brushed and polished metal 3D "
-                "materials; technical geometric line elements"},
-    3: {"name": "High-Contrast Academic",
+                "luminous atmosphere; crisp white (#F5F7FA) and teal typography; real matte and brushed-metal "
+                "materials lit like a product photo; technical geometric line elements"},
+    3: {"name": "High-Contrast Academic", "hex": ["#F2EBDD", "#B4532A", "#2B2B2B"],
         "spec": "pale cream / bone background (#F2EBDD) with a thin cross-dot grid (#D8CDB8); deep terracotta and "
                 "burnt-orange shapes (#B4532A, #E07B39); charcoal (#2B2B2B) and orange typography; editorial "
                 "cutouts; warm dimensional lighting"},
 }
+
+# Realistic art-direction families. Each run offers a random handful so the look changes from video to video; the
+# director picks the one that suits the topic (or invents a fresh one), then derives the palettes from the topic.
+ART_DIRECTIONS = [
+    "editorial science still life: the real object on a seamless paper sweep, soft window light, print-magazine layout",
+    "museum specimen display: the subject on a plinth in a gallery set, gallery spotlights, engraved-label typography",
+    "tabletop miniature world: real handmade props at small scale, macro lens, tilt-shift depth, warm practical lights",
+    "paper craft and cut-card dioramas: layered real card stock, visible paper fibre, folded and stacked forms",
+    "architectural maquette: white card and wood scale models, raking sunlight, long precise shadows",
+    "industrial product launch: the real product on machined stages, studio strip lights, technical callout type",
+    "botanical / natural history: real plants, stones, soil and water, soft daylight, field-guide typography",
+    "kitchen-table documentary: everyday objects on real surfaces (wood, linen, concrete), natural mixed light",
+    "stop-motion clay and felt: tactile hand-made forms with real fingerprints and fibres, cosy practical lights",
+    "brutalist concrete set: raw concrete blocks and steps, hard sun and deep shadow, heavy slab typography",
+    "retro print and risograph: real printed paper textures, halftone posters standing in the set, ink-bleed type",
+    "night-city practicals: real objects lit by street, sign and window light spilling in (no neon materials)",
+    "workshop and blueprint: real tools, pencils, rulers and drafting paper, warm lamp light, hand-lettered notes",
+    "luxury material study: real stone, leather, linen and brushed brass surfaces, low-key controlled light",
+    "sports and motion lab: real equipment, chalk lines and track markings, fast hard light, condensed numerals",
+    "children's picture-book set: real painted wood toys and paper, bright soft light, rounded friendly type",
+]
 
 # The user's master prompt, verbatim (prompts/motion_graphics_3d_master.md), plus this app's runtime section.
 MASTER = (Path(__file__).resolve().parent.parent / "prompts" / "motion_graphics_3d_master.md").read_text(encoding="utf-8")
@@ -45,7 +70,7 @@ APP_SECTION = """
 ## THIS APP (runtime information: how your stages run here - follow the master prompt above for everything else)
 
 STAGES AND STOPS: here you write Stages 2, 3, 4, 5 and 6 in ONE response (as JSON below). The app then shows each
-stage to the user at its approval step - script and beats, the palette (with buttons to switch to the other two),
+stage to the user at its approval step - script and beats, the art direction and palette (with buttons to switch to the other two),
 every keyframe and motion prompt, and the production plan - and nothing is generated until the user approves. That
 approval step is the master prompt's STOP / NEXT. Stage 1 only when the input has no real topic (see the end).
 Stage 7-9 (generation, validation, delivery) is done by the app's film engine after approval.
@@ -56,17 +81,47 @@ FULL 3D (the user's direction for this studio): Section 4 is used in EVERY scene
 - 4.1 + 4.4: the hero is a real 3D object with purposeful 3D motion, and the camera moves in 3D (dolly, orbit, arc,
   crane, macro push-in, Z-axis) - camera movement never replaces object animation.
 - 4.3: name the materials and the key / fill / rim lights, reflections, ambient occlusion and contact shadows.
-- 4.5: the TYPOGRAPHY TEXT is built INTO the 3D scene as dimensional letters (extruded, metallic, glass, layered,
-  passing behind or emerging from objects): write the exact words in quotes inside the keyframe prompt and say
+- 4.5: the TYPOGRAPHY TEXT is built INTO the 3D scene as dimensional letters (solid extruded, layered, printed or
+  painted, passing behind or emerging from objects - see REALISTIC LOOK for the material): write the exact words in quotes inside the keyframe prompt and say
   their material, size, position and how they sit in the space. Keep it to 1-3 words when possible (4 at most), so
   the image model spells them exactly; the app checks the spelling of every frame and redraws a wrong one.
 - 4.6: exploded views only with components supported by the brief or the references.
 - Section 5 (mixed media) appears only as 3D objects in the scene (paper-textured planes, extruded vector shapes,
   halftone panels standing in space, floating grid planes) - not as flat 2D overlays.
 - The Stage 3 palettes become 3D worlds: the background colour is the studio floor / walls / sky of the space, the
-  grid is a floor or wall plane, the accents are materials (e.g. royal purple glass, teal emissive, terracotta
-  ceramic). Use ONLY the locked palette's colours; never invent extra accents (only real photos and the user's
+  grid is a floor or wall plane, the accents are real materials (e.g. royal purple matte paint, teal powder-coated
+  metal, terracotta ceramic). Use ONLY the locked palette's colours; never invent extra accents (only real photos and the user's
   product keep their own colours).
+
+ART DIRECTION - DIFFERENT FOR EVERY VIDEO (the user's direction): there is no house style. Design a look for THIS
+topic, as a creative director would, so that two videos on different topics never look alike - and two videos on
+the same topic still get their own take. Start from the subject's real world (its real colours, materials, places,
+tools and culture), pick the best fitting option from STYLE OPTIONS FOR THIS VIDEO below (or blend two, or invent a
+better one), and describe it in "art_direction". Then write THREE palettes for this topic (Stage 3): three
+genuinely different colour directions drawn from the subject (not generic presets), each with 3-5 HEX colours
+(background first, then accents, then type). Every scene keeps the chosen art direction and the locked palette -
+the variety is between videos, never inside one film.
+STYLE OPTIONS FOR THIS VIDEO: {STYLES}
+
+REALISTIC LOOK (the user's direction; it overrides the material and typography lists in 4.3 and 4.5, whatever the
+art direction):
+- Every keyframe reads as a real photograph of a real, physical set - not a stylised CGI toy. The hero looks like
+  the REAL thing, true to its real material, shape, colour and surface detail (e.g. a brain is anatomically
+  accurate matte organic tissue; a coin is worn real metal; a plant is a living plant; a phone is the real device).
+  Accents may take the palette's colours, but the hero keeps its real substance.
+- NEVER make the hero, the letters or the set out of glass, crystal, clear or tinted acrylic, transparent resin,
+  jelly, liquid metal, polished chrome, mirror finishes, marble, iridescent / holographic / pearlescent films or
+  glowing neon edges - unless the USER INPUT explicitly asks for that material.
+- Light it like a real photo shoot that suits the art direction (soft key and fill, hard sun, practicals, low-key
+  spot...), with natural contact shadows, ambient occlusion and real depth of field. No random reflections,
+  lens-flare sparkles or plastic sheen.
+- Typography fits the art direction (choose the typeface style, weight and placement for THIS video: condensed
+  sans, slab, serif, rounded, hand-lettered, engraved...), made of a real solid material - matte paint, paper,
+  card, wood, stone, metal plate, printed ink - never glass, chrome or neon.
+- Mixed-media accents come from the art direction and stay tactile and real (paper, card, print, string, tape,
+  chalk, the subject's own tools).
+- Write it into every keyframe_prompt: "photorealistic, real <material> texture, <the art direction's photography
+  style>".
 
 MOTION PROMPTS (Stage 5): the clip model (Kling / Seedance) animates each keyframe for 3-10 s. Adapt the six-second
 timeline to the scene's real length. The 3D letters stay rigid, solid and readable for the whole clip (they may move
@@ -81,7 +136,6 @@ joined film -> narration, music, effects. Say so in "production" and name the ho
 object; very small or long text may come out misspelled and is redrawn).
 
 LENGTH: {LENGTH}. PALETTE: {PALETTE_RULE}
-Palettes (Stage 3): {PALETTES}
 
 FACTS: state only what the RESEARCH given supports (cite it in fact_notes); no fake statistics.
 
@@ -90,6 +144,12 @@ Return ONLY JSON:
  "title": "...", "category": "...", "objective": "...", "audience": "...", "approach": ["..."],
  "script": "the complete narration", "beats": [{"id": "B01", "line": "exact sentence", "role": "hook | reframe |
   mechanism | insight | closing"}],
+ "art_direction": {"name": "a short name for this video's look", "concept": "why this look suits the topic",
+  "set": "the physical world the scenes live in", "materials": "real materials of hero, set and letters",
+  "typography": "typeface style, weight, material and placement", "lighting": "the photography lighting",
+  "camera": "lens and camera language", "texture": "grain, print, surface character"},
+ "palettes": [{"option": 1, "name": "...", "spec": "background, accents, type and materials in words",
+  "hex": ["#bg", "#accent", "#type"]}, {"option": 2, ...}, {"option": 3, ...}],
  "palette": {"option": 1 | 2 | 3, "name": "...", "why": "why it fits this topic"},
  "scenes": [{"n": 1, "beat": "B01", "script_line": "exact sentence", "duration_s": 3-10 (about the time to say the
   line plus a beat to read the type), "visual_concept": "what the viewer sees", "hero_subject": "main subject and
@@ -117,19 +177,27 @@ idea, a history story, a money myth, a behavioural trap) - never five variations
 DIRECTOR = MASTER + APP_SECTION
 
 
-def palette_rule(option: int | None) -> str:
-    if option in PALETTES:
-        return (f"LOCKED by the user: option {option} ({PALETTES[option]['name']}). Use it in every scene; never "
+def palette_rule(option: int | None, palettes: dict | None = None) -> str:
+    pals = palettes or PALETTES
+    if option in pals:
+        return (f"LOCKED by the user: option {option} ({pals[option]['name']}). Use it in every scene; never "
                 "change it.")
     return ("choose the palette that fits this topic best and lock it for every scene (the user can switch it before "
             "the render).")
 
 
+def style_options(k: int = 4, rng: random.Random | None = None) -> list[str]:
+    """A random handful of art directions for this run, so each video starts from a different place."""
+    return (rng or random).sample(ART_DIRECTIONS, k)
+
+
 def messages(prompt: str, cls: dict, res: dict | None, files_note: str, apps: str, aspect_ratio,
-             palette: int | None = None, keep_script: str | None = None) -> list[dict]:
+             palette: int | None = None, keep_script: str | None = None, keep_style: dict | None = None) -> list[dict]:
     length = (f"Target {cls['duration_s']} seconds" if cls.get("duration_s") else "Target 15-60 seconds")
-    system = MASTER + (APP_SECTION.replace("{LENGTH}", length).replace("{PALETTE_RULE}", palette_rule(palette))
-                       .replace("{PALETTES}", json.dumps({k: v["name"] + ": " + v["spec"] for k, v in PALETTES.items()}))
+    pals = (keep_style or {}).get("palettes")
+    styles = "\n".join(f"- {x}" for x in style_options())
+    system = MASTER + (APP_SECTION.replace("{LENGTH}", length).replace("{PALETTE_RULE}", palette_rule(palette, pals))
+                       .replace("{STYLES}", "\n" + styles)
                        .replace("{APPS}", apps or "(registry unavailable)"))
     user = [f"USER INPUT:\n{prompt.strip()}", f"FORMAT: {aspect_ratio or '9:16'}", f"FILES: {files_note}",
             f"UNDERSTANDING: {json.dumps({k: cls.get(k) for k in ('category', 'intent', 'subject', 'audience', 'tone', 'language')}, ensure_ascii=False)}"]
@@ -138,7 +206,31 @@ def messages(prompt: str, cls: dict, res: dict | None, files_note: str, apps: st
             {k: res.get(k) for k in ("summary", "angle", "facts", "timeline", "note")}, ensure_ascii=False)[:12000])
     if keep_script:
         user.append(f"KEEP THIS APPROVED SCRIPT WORD FOR WORD (only the palette changes):\n{keep_script}")
+    if keep_style:
+        user.append("KEEP THIS ART DIRECTION AND THESE THREE PALETTES exactly (return them unchanged); only the locked "
+                    "palette changes:\n" + json.dumps(keep_style, ensure_ascii=False))
     return [{"role": "system", "content": system}, {"role": "user", "content": "\n\n".join(user)}]
+
+
+HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def palettes_of(d: dict) -> dict[int, dict]:
+    """The three palettes the director wrote for this video (Stage 3), or the fallback set when it wrote none."""
+    out = {}
+    for i, p in enumerate([x for x in d.get("palettes") or [] if isinstance(x, dict)][:3], start=1):
+        hexes = [h.strip() for h in (p.get("hex") or []) if isinstance(h, str) and HEX.match(h.strip())][:5]
+        if p.get("name"):
+            out[i] = {"name": str(p["name"])[:60], "spec": str(p.get("spec") or "")[:600], "hex": hexes}
+    return out if len(out) >= 2 else {k: dict(v) for k, v in PALETTES.items()}
+
+
+def keep_style(plan: dict) -> dict:
+    """The approved look (art direction + this video's palettes) to keep through a palette switch."""
+    mg = plan.get("motion_graphics") or {}
+    pals = {int(k): v for k, v in (mg.get("palette_specs") or {}).items()}
+    return {"art_direction": mg.get("art_direction") or {},
+            "palettes": pals or {k: dict(v) for k, v in PALETTES.items()}}
 
 
 def _timeline_text(m: dict) -> str:
@@ -148,9 +240,14 @@ def _timeline_text(m: dict) -> str:
 def to_plan(d: dict) -> dict:
     """The director's output in the shared story-plan shape (so validation, the UI, edits, single-scene
     regeneration and the film engine all work), with the motion-graphics fields kept on each scene."""
+    pals = palettes_of(d)
     opt = (d.get("palette") or {}).get("option")
-    pal = PALETTES.get(opt if isinstance(opt, int) else int(opt) if str(opt).isdigit() else 0)
-    look = f"{pal['name']}: {pal['spec']}" if pal else ""
+    opt = opt if isinstance(opt, int) else int(opt) if str(opt).isdigit() else None
+    pal = pals.get(opt) if opt else None
+    art = d.get("art_direction") if isinstance(d.get("art_direction"), dict) else {}
+    art_text = ", ".join(str(art[k]) for k in ("set", "materials", "typography", "lighting", "texture") if art.get(k))
+    look = "; ".join(x for x in (f"{pal['name']}: {pal['spec']}" if pal else "",
+                                 f"art direction {art.get('name')}: {art_text}" if art.get("name") else "") if x)
     scenes = []
     for n, s in enumerate([x for x in d.get("scenes") or [] if isinstance(x, dict)], start=1):
         m = s.get("motion") if isinstance(s.get("motion"), dict) else {}
@@ -192,8 +289,9 @@ def to_plan(d: dict) -> dict:
                                                                              for s in d.get("scenes") or [])[:1500]}],
                       "world": {"palette": look, "background": "locked palette background, grid and accents",
                                 "lighting": "premium directional key, soft fill, rim light, contact shadows"}},
-            "style": {"visual_style": "Full 3D motion graphics (the user's master prompt, Section 4 in every scene) - "
-                                      + ", ".join(d.get("approach") or []),
+            "style": {"visual_style": "Full 3D motion graphics (the user's master prompt, Section 4 in every scene)"
+                                      + (f" - {art['name']}" if art.get("name") else "")
+                                      + (" - " + ", ".join(d.get("approach") or []) if d.get("approach") else ""),
                       "look": look, "palette_option": opt,
                       "effects_plan": [{"scene": n, "effect": (sc.get("motion") or {}).get("typography_motion") or "",
                                         "why": f"typography: {sc.get('typography_text') or ''}"}
@@ -207,17 +305,38 @@ def to_plan(d: dict) -> dict:
             "takeaway": next((b.get("line") for b in reversed(d.get("beats") or [])
                               if isinstance(b, dict) and b.get("role") == "closing"), ""),
             "motion_graphics": {"script": d.get("script"), "beats": d.get("beats") or [], "palette": d.get("palette"),
-                                "palettes": {k: v["name"] for k, v in PALETTES.items()},
+                                "palettes": {k: v["name"] for k, v in pals.items()},
+                                "palette_swatches": {k: v.get("hex") or [] for k, v in pals.items()},
+                                "palette_specs": pals, "art_direction": art,
                                 "connection": d.get("connection") or " -> ".join(f"S{i:02d}" for i in range(1, len(scenes) + 1)),
                                 "production": d.get("production") or {}, "approach": d.get("approach") or [],
                                 "category": d.get("category"), "audience": d.get("audience")}}
 
 
-def lint(plan: dict) -> list[dict]:
+# Stylised materials the user does not want unless they ask for them (the REALISTIC LOOK rule above).
+STYLIZED = re.compile(r"\b(glass(y)?|crystal(line)?|acrylic|resin|translucent|transparent|see-through|jelly|"
+                      r"liquid[- ]metal|chrome|chromed|mirror(ed)?|marble|iridescen\w*|holograph\w*|pearlescen\w*|"
+                      r"neon)\b", re.I)
+
+
+def wants_stylized(prompt: str) -> bool:
+    """The user asked for glass / chrome / marble etc. themselves, so the realism rule steps aside."""
+    return bool(STYLIZED.search(prompt or ""))
+
+
+def lint(plan: dict, stylized_ok: bool = False) -> list[dict]:
     """Stage-2 / Stage-4 rules the director must keep (on top of the shared scene rules)."""
     out = []
     for s in plan.get("scenes") or []:
         mg = s.get("motion_gfx") or {}
+        if not stylized_ok:
+            look = " ".join(str(mg.get(k) or "") for k in ("keyframe_prompt", "typography_style", "three_d_elements"))
+            bad = sorted({m.group(0).lower() for m in STYLIZED.finditer(look)})
+            if bad:
+                out.append({"scene": s["n"], "area": "prompts",
+                            "problem": f"stylised materials ({', '.join(bad)}) instead of a realistic look",
+                            "fix": "real-world materials true to the subject, matte letters, natural studio "
+                                   "photography (REALISTIC LOOK)"})
         line = str(mg.get("script_line") or "")
         if len(line.split()) > 14:
             out.append({"scene": s["n"], "area": "scenes", "problem": f"the line has {len(line.split())} words",

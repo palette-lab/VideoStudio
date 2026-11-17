@@ -156,15 +156,17 @@ async def review(prompt: str, cls: dict, plan: dict, res: dict | None) -> dict:
 
 
 async def develop(prompt: str, files: list[dict] | None = None, documents: list[dict] | None = None,
-                  duration_s=None, aspect_ratio=None, progress=None) -> dict:
+                  duration_s=None, aspect_ratio=None, progress=None, force_motion: bool = False) -> dict:
     """The whole pipeline. Returns the story intelligence record kept on the run."""
     files, documents = files or [], documents or []
     say = progress or (lambda m: None)
     t0 = time.time()
     await _maybe(say, "Story: understanding the request")
     cls = await classify(prompt, files, duration_s, aspect_ratio)
+    if force_motion:  # 3D Motion Video mode: any topic goes to the 3D Motion Graphics Director
+        cls["production"] = "motion_graphics"
     intel = {"classification": cls, "version": 1}
-    if cls.get("agent") in SKIP_AGENTS:
+    if cls.get("agent") in SKIP_AGENTS and not force_motion:
         intel["skipped"] = f"handled by the {cls['agent']} agent"
         return intel
     if cls.get("has_topic") is False:  # stage 1 (topic ideas) needs no research rabbit hole
@@ -207,8 +209,9 @@ def _apps() -> str:
 
 
 async def _direct(prompt: str, cls: dict, res: dict | None, files: list[dict], aspect_ratio, palette: int | None = None,
-                  keep_script: str | None = None, feedback: list[dict] | None = None, previous: dict | None = None) -> dict:
-    msgs = motion.messages(prompt, cls, res, _files_note(files), _apps(), aspect_ratio, palette, keep_script)
+                  keep_script: str | None = None, feedback: list[dict] | None = None, previous: dict | None = None,
+                  keep_style: dict | None = None) -> dict:
+    msgs = motion.messages(prompt, cls, res, _files_note(files), _apps(), aspect_ratio, palette, keep_script, keep_style)
     if feedback and previous:
         msgs += [{"role": "assistant", "content": json.dumps(previous, ensure_ascii=False)[:60000]},
                  {"role": "user", "content": agents.REVISE.replace("{ISSUES}", "\n".join(
@@ -219,7 +222,7 @@ async def _direct(prompt: str, cls: dict, res: dict | None, files: list[dict], a
 
 async def _motion_review(prompt: str, cls: dict, plan: dict, res: dict | None) -> dict:
     rev = await review(prompt, cls, plan, res)
-    extra = motion.lint(plan)
+    extra = motion.lint(plan, motion.wants_stylized(prompt))
     rev["rules"] = rev["rules"] + extra
     rev["passed"] = rev["passed"] and not extra
     return rev
@@ -229,6 +232,7 @@ async def _develop_motion(intel: dict, prompt: str, cls: dict, res: dict | None,
                           t0: float) -> dict:
     """The 3D Motion Graphics Director's stages 1-6, validated like every other plan (one revision)."""
     intel["mode"] = "motion_graphics"
+    intel["stylized_ok"] = motion.wants_stylized(prompt)  # the user asked for glass / chrome themselves
     aspect_ratio = aspect_ratio or "9:16"  # the master prompt: vertical 9:16 unless the user asks otherwise
     intel["aspect_ratio"] = aspect_ratio
     await _maybe(say, "Motion graphics director: script, palette, keyframes and motion")
@@ -259,13 +263,18 @@ async def _develop_motion(intel: dict, prompt: str, cls: dict, res: dict | None,
 async def switch_palette(intel: dict, option: int, prompt: str, files: list[dict] | None = None,
                          aspect_ratio=None) -> dict:
     """Stage 3 again: the user's palette, locked; the approved script stays word for word."""
-    if option not in motion.PALETTES:
-        raise ValueError("choose palette 1, 2 or 3")
     if intel.get("mode") != "motion_graphics":
         raise ValueError("palettes belong to motion graphics plans")
+    style = motion.keep_style(intel.get("plan") or {})
+    if option not in style["palettes"]:
+        raise ValueError(f"choose palette {', '.join(str(k) for k in sorted(style['palettes']))}")
     cls = intel["classification"]
     keep = ((intel.get("plan") or {}).get("motion_graphics") or {}).get("script")
-    raw = await _direct(prompt, cls, intel.get("research"), files or [], aspect_ratio, option, keep)
+    raw = await _direct(prompt, cls, intel.get("research"), files or [], aspect_ratio, option, keep, keep_style=style)
+    if not raw.get("palettes"):  # the director dropped them: this video's palettes and look stay as they were
+        raw["palettes"] = [{"option": k, **v} for k, v in sorted(style["palettes"].items())]
+    if not raw.get("art_direction"):
+        raw["art_direction"] = style["art_direction"]
     plan = motion.to_plan(raw)
     if not plan["scenes"]:
         raise llm.LLMError("the director returned no scenes")
@@ -335,7 +344,7 @@ def _relint(intel: dict) -> None:
     v = intel.setdefault("validation", {})
     v["rules"] = validate_.lint(intel["plan"], cls.get("duration_s"), cls.get("category", ""))
     if intel.get("mode") == "motion_graphics":
-        v["rules"] += motion.lint(intel["plan"])
+        v["rules"] += motion.lint(intel["plan"], bool(intel.get("stylized_ok")))
     v["edited_at"] = time.time()
 
 

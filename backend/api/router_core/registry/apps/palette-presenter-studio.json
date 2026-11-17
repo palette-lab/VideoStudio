@@ -1,16 +1,16 @@
 {
   "app_id": "palette-presenter-studio",
   "name": "Presenter Studio",
-  "description": "Talking-to-camera videos with lip-synced speech: YouTube explainers, UGC ads, testimonials and spokesperson videos. Writes the script, uses the user's photo of the presenter or casts a fictional one with Nano Banana Pro, speaks the script (or uses the user's own recording) and lip-syncs the presenter to it. Voice (Kokoro) and lip-sync (Ditto) run free on the local machine.",
+  "description": "Talking-to-camera videos with lip-synced speech: YouTube explainers, UGC ads, testimonials and spokesperson videos. Writes the script, uses the user's photo of the presenter or casts a fictional one with Nano Banana Pro, speaks the script (or uses the user's own recording) and lip-syncs the presenter to it. The voice (Kokoro) runs free on the local machine; the presenter is filmed with Kling and lip-synced with Kling LipSync (Sync Lipsync 1.9 as fallback) on fal.",
   "status": "available",
   "verified": false,
   "execution": {
     "adapter": "engine",
-    "service_target": "engines/presenter_engine.py (local Ditto + Kokoro; fal models only with PRESENTER_PAID=on)"
+    "service_target": "engines/presenter_engine.py (local Kokoro voice; Kling base clip + Kling LipSync / Sync Lipsync 1.9 on fal)"
   },
   "source": {
-    "repo": "antgroup/ditto-talkinghead, hexgrad/Kokoro-82M (kokoro-onnx)",
-    "license": "Apache-2.0 (Ditto's InsightFace face detector: non-commercial research)"
+    "repo": "hexgrad/Kokoro-82M (kokoro-onnx); fal: Kling, Sync Lipsync 1.9",
+    "license": "Kokoro: Apache-2.0; Kling and Sync: fal commercial API"
   },
   "capabilities": [
     "presenter.talking_head"
@@ -87,5 +87,5 @@
       "status": "confirmed"
     }
   },
-  "profile_notes": "Added 2026-11-13. Free by default: voice Kokoro (Apache-2.0, local CPU; English, Hindi, Spanish, French, Italian, Japanese, Portuguese, Chinese) and lip-sync Ditto (Apache-2.0, local Apple GPU or CPU), installed with tools/local_lipsync/setup.sh. Presenter photo: the user's, else Nano Banana Pro on fal (paid, cents). PRESENTER_PAID=on adds ElevenLabs and fal lip-sync (Kling AI Avatar v2, LongCat, InfiniteTalk) as fallbacks. Speech is cut at pauses into parts of at most 27 s and joined with jump cuts. Test quality: up to 15 s; full: up to 180 s. No captions yet."
+  "profile_notes": "Added 2026-11-13. Free by default: voice Kokoro (Apache-2.0, local CPU; English, Hindi, Spanish, French, Italian, Japanese, Portuguese, Chinese) installed with tools/local_lipsync/setup.sh. Presenter photo: the user's, else Nano Banana Pro on fal (paid, cents). 2026-11-17: lip-sync is paid on fal - one 10 s Kling image-to-video base clip of the presenter, then each speech part (2-10 s, cut at pauses) is lip-synced onto its own window of it with Kling LipSync (fal-ai/kling-video/lipsync/audio-to-video), falling back to Sync Lipsync 1.9 (fal-ai/sync-lipsync); the local Ditto lip-sync was removed. PRESENTER_PAID=on only adds ElevenLabs as a voice fallback. Parts are joined with jump cuts. Test quality: up to 15 s; full: up to 180 s. No captions yet."
 }
