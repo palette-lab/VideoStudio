@@ -37,6 +37,7 @@ from engines import adapter as engine_adapter
 from engines import story_intel
 from engines.story_intel import research as story_research
 from engines import explainroo_engine
+from engines import opuscar_engine, vox_doc_engine
 from engines.story_intel import direct as story_direct
 from models import Run
 from router_core import config, execution, fallback, llm, perception, pipeline, registry, validator
@@ -48,7 +49,8 @@ router = PluginRouter(tags=["palette-video"])
 
 READ = [require_permission("resources:read")]
 WRITE = [require_permission("resources:write")]
-MODES = {"auto", "normal", "hybrid", "analyze", "storyboard", "flow", "motion", "presenter", "motion3d", "explainer"}
+MODES = {"auto", "normal", "hybrid", "analyze", "storyboard", "flow", "motion", "presenter", "motion3d", "explainer",
+         "programmatic", "documentary"}
 BUSY = {"analyzing", "approved", "executing"}
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 EXT_MODALITY = {".jpg": "image", ".jpeg": "image", ".png": "image", ".webp": "image", ".heic": "image",
@@ -69,7 +71,8 @@ def _media(assets: dict) -> dict:
 def _configure(ctx: PluginContext) -> None:
     config.configure(api_key=ctx.secret("PALETTE_API_KEY") or "", base_url=ctx.secret("PALETTE_LLM_BASE_URL"),
                      openmontage_dir=ctx.secret("OPENMONTAGE_DIR"), model=ctx.secret("PALETTE_LLM_MODEL") or "")
-    for name in ("FAL_KEY", "PALETTE_VIDEO_QUALITY", "OPENMONTAGE_GUIDES_DIR", "RESEARCH_CONTACT"):  # the engines read these from the environment
+    for name in ("FAL_KEY", "PALETTE_VIDEO_QUALITY", "OPENMONTAGE_GUIDES_DIR", "RESEARCH_CONTACT",
+                 "LLM_ROUTER_API_KEY", "LLM_ROUTER_BASE_URL"):  # the engines read these from the environment
         value = ctx.secret(name)
         if value:
             os.environ[name] = value
@@ -259,12 +262,32 @@ async def analyze_job(ctx: PluginContext, execution_: JobExecution, payload: dic
         explainer = explainroo_engine.wanted(run)
         if explainer:  # documents -> Document Explainer: it reads and analyses them itself, no story or enhancer
             _event(run, f"Document Explainer: {len(explainroo_engine.documents_of(run))} document(s) to explain")
-        if "enhanced_prompt" not in run and not run.get("parent_run") and not explainer:
+        programmatic = not explainer and opuscar_engine.wanted(run)
+        if programmatic:  # a film drawn in code: it writes its own script and look, no story or enhancer
+            style = opuscar_engine.named_style(run["prompt"])
+            _event(run, "Programmatic Film" + (f": the {opuscar_engine.STYLES[style]['name']} look" if style else ""))
+        documentary = not explainer and not programmatic and vox_doc_engine.wanted(run)
+        if documentary:  # the VOX documentary: it writes its own script from the playbook, no story or enhancer
+            _event(run, "VOX Documentary (the Made by AI Playbook)")
+        if run.get("parent_run") and not explainer and not programmatic and await _next_episode(ctx, run):
+            _event(run, "Next episode written with the series' cast and story so far")
+        if ("enhanced_prompt" not in run and not run.get("parent_run") and not explainer and not programmatic
+                and not documentary):
             run["stage"] = "enhancing"
             _event(run, "Enhancing the prompt")
             await _save(ctx, run)
             await execution_.progress(35, "Enhancing the prompt")
             await _auto_enhance(ctx, run)
+        documentary = documentary or run.get("route") == "documentary"  # Story Intelligence saw a documentary
+        if documentary:
+            ask = await _documentary_prepare(run)
+            if ask:  # the playbook's STEP 1 (a topic) or STEP 2 (the length): the user answers in the chat
+                run.update(status="needs_clarification", stage=None, questions=[ask])
+                _event(run, "A question for you: " + ask["question"])
+                run["usage"] = llm.usage_summary(run)
+                llm.usage_log.reset(token)
+                await _save(ctx, run)
+                return {"run_id": run["id"], "status": run["status"]}
         if run.get("pending_topic"):  # 3D Motion Graphics Director, stage 1: the user picks one of five topics
             run.update(status="needs_clarification", stage=None, questions=[{
                 "id": "topic", "question": TOPIC_Q, "why": "Your request has no single topic yet; pick one to develop.",
@@ -285,6 +308,10 @@ async def analyze_job(ctx: PluginContext, execution_: JobExecution, payload: dic
                        f"it, but the words above win wherever they differ):\n{planned}")
         if explainer:
             res = _explainer_result(run)
+        elif programmatic:
+            res = _programmatic_result(run)
+        elif documentary:
+            res = _documentary_result(run)
         elif story_direct.applies(run):  # the film is already written and approved: no second reading
             res = _direct_result(run)
         else:
@@ -338,6 +365,70 @@ def _explainer_result(run: dict) -> dict:
                                                                     if missing else [])
     _event(run, "Plan: the Document Explainer explains your document" if not blocking
            else "The Document Explainer cannot make this video")
+    return {"understanding": d["understanding"], "plan": d["plan"], "issues": issues, "questions": [],
+            "plan_mode": run["mode"], "status": "not_possible" if blocking else "awaiting_approval",
+            "blocking_reasons": blocking}
+
+
+def _programmatic_result(run: dict) -> dict:
+    """A film drawn in code: one Programmatic Film step (Lemo-Opuscar's renderer), or why it cannot be made here."""
+    missing = opuscar_engine.available()
+    d = opuscar_engine.build(run)
+    issues = validator.validate(d["plan"], d["understanding"], run["mode"], _media(run["assets"]))
+    blocking = [i["message"] for i in validator.errors(issues)] + ([f"the Programmatic Film cannot run here: {missing}"]
+                                                                    if missing else [])
+    _event(run, "Plan: a Programmatic Film drawn in code" if not blocking
+           else "The Programmatic Film cannot be made here")
+    return {"understanding": d["understanding"], "plan": d["plan"], "issues": issues, "questions": [],
+            "plan_mode": run["mode"], "status": "not_possible" if blocking else "awaiting_approval",
+            "blocking_reasons": blocking}
+
+
+async def _documentary_prepare(run: dict) -> dict | None:
+    """The Made by AI Playbook's first steps before the plan: a topic (50 ideas when there is none), a length (1, 5, 8,
+    12 or 20 minutes; the composer's length snaps to the closest), then Opus writes the script for the approval.
+    Returns the question to ask, or None when the script is written."""
+    doc = run.setdefault("documentary", {})
+    answers = run.get("answers") or {}
+    topic = answers.get(vox_doc_engine.TOPIC_Q) or doc.get("topic")
+    if not topic:
+        if "ideas" not in doc:
+            _event(run, "Documentary: is there a topic? (Prompt 1, step 1)")
+            doc["ideas"] = await vox_doc_engine.topic_ideas(run["prompt"]) or []
+        if doc["ideas"] and not run.get("proceed_with_defaults"):
+            return {"id": "topic", "question": vox_doc_engine.TOPIC_Q, "options": doc["ideas"], "kind": "choice",
+                    "why": "Your request has no single topic yet: pick one of these documentary ideas.",
+                    "blocking": True, "affects": "content", "source": "ai"}
+        topic = doc["ideas"][0] if doc["ideas"] else run["prompt"]
+    doc["topic"] = topic
+    minutes = (vox_doc_engine.minutes_of(answers.get(vox_doc_engine.LENGTH_Q))
+               or vox_doc_engine.minutes_for((run.get("settings") or {}).get("duration_s"))
+               or (1 if run.get("proceed_with_defaults") else None))
+    if not minutes:
+        return {"id": "length", "question": vox_doc_engine.LENGTH_Q, "options": vox_doc_engine.LENGTH_OPTIONS,
+                "kind": "choice", "why": "The script is written to match the length (about 150 words a minute).",
+                "blocking": True, "affects": "content", "source": "ai"}
+    doc["minutes"] = minutes
+    if not doc.get("script") or doc.get("script_for") != [topic, minutes]:
+        _event(run, f"Documentary: Opus writes the {minutes}-minute script (Prompt 1)")
+        doc["script"] = await vox_doc_engine.write_script(topic, minutes)
+        doc["script_for"] = [topic, minutes]
+        n = len(vox_doc_engine.sentences(vox_doc_engine.script_text(doc["script"])))
+        _event(run, f"Script ready: “{doc['script'].get('title') or topic}”, {n} sentences = {n} illustrations")
+    run.update(enhanced_prompt=vox_doc_engine.script_text(doc["script"]), agent="documentary",
+               agent_label="VOX Documentary Director (Made by AI Playbook)", agent_why=f"{minutes} min: {topic}"[:200])
+    return None
+
+
+def _documentary_result(run: dict) -> dict:
+    """The written documentary as one VOX Documentary step, or why it cannot be made here."""
+    missing = vox_doc_engine.available()
+    d = vox_doc_engine.build(run)
+    issues = validator.validate(d["plan"], d["understanding"], run["mode"], _media(run["assets"]))
+    blocking = [i["message"] for i in validator.errors(issues)] + ([f"the VOX Documentary cannot run here: {missing}"]
+                                                                    if missing else [])
+    _event(run, "Plan: a VOX documentary, animated in code" if not blocking
+           else "The VOX Documentary cannot be made here")
     return {"understanding": d["understanding"], "plan": d["plan"], "issues": issues, "questions": [],
             "plan_mode": run["mode"], "status": "not_possible" if blocking else "awaiting_approval",
             "blocking_reasons": blocking}
@@ -840,6 +931,10 @@ async def _story_intelligence(ctx: PluginContext, run: dict) -> bool:
         _event(run, f"Story intelligence unavailable ({str(e)[:100]}); using the prompt enhancer")
         return False
     cls = intel.get("classification") or {}
+    if intel.get("route") == "documentary":  # a documentary: the VOX Documentary writes its own script
+        run.update(route="documentary", enhanced_prompt=None)  # asked once: the documentary writes its own script
+        _event(run, "A documentary: the VOX Documentary (Made by AI Playbook) makes it")
+        return True
     if intel.get("topic_ideas") and not topic:
         run["story_intel"] = intel
         run["pending_topic"] = intel["topic_ideas"]
@@ -865,12 +960,54 @@ async def _story_intelligence(ctx: PluginContext, run: dict) -> bool:
         label = pe.AGENTS[agent][0]
         if intel.get("mode") == "cinematic_doc":  # the cinematic-skill method wrote and directed it
             agent, label = "story", "Cinematic Documentary Director"
+        if intel.get("mode") == "short_drama":  # script, cast, one lip-synced shot per spoken line
+            agent, label = "drama", pe.AGENTS["drama"][0]
     run.update(enhanced_prompt=story_intel.as_brief(intel), agent=agent, agent_label=label,
                agent_why=f"{cls.get('category', '').replace('_', ' ')}: {cls.get('intent') or ''}"[:200])
     v = intel.get("validation") or {}
     _event(run, f"Story ready: {len(intel['plan']['scenes'])} scenes"
                 + (f", review {v['score']}/100" if v.get("score") is not None else "")
                 + (" (revised)" if v.get("revised") else ""))
+    return True
+
+
+async def _next_episode(ctx: PluginContext, run: dict) -> bool:
+    """A follow-up asking for the next episode (or episode N) of a short-drama series: written by the Short Drama
+    Director with the series' locked cast (and its drawn faces) and the story so far. False when it is not that."""
+    from engines.story_intel import drama
+    if "story_intel" in run or not config.LLM_API_KEY:
+        return False
+    asked = drama.wants_episode(run.get("message") or "")
+    if asked is None:
+        return False
+    try:
+        parent = await _load(ctx, run["parent_run"])
+    except Exception:  # the earlier run is gone: an ordinary follow-up
+        return False
+    series = (parent.get("story_intel") or {}).get("series")
+    if not series:
+        return False
+    n = drama.next_number(series, asked)
+    st = run.get("settings") or {}
+
+    async def progress(msg: str) -> None:
+        _event(run, msg)
+        await _save(ctx, run)
+
+    docs = [d for d in (run.get("documents") or {}).values() if d.get("text")]
+    try:
+        intel = await story_intel.develop(_story_prompt(run), _story_files(run), docs, st.get("duration_s"),
+                                          st.get("aspect_ratio"), progress, series=copy.deepcopy(series), episode=n)
+    except (llm.LLMError, ValueError, KeyError, TypeError) as e:
+        log.warning("episode %s failed for %s: %s", n, run["id"], e)
+        _event(run, f"Episode {n} could not be written ({str(e)[:100]}); treating it as a normal follow-up")
+        return False
+    if not (intel.get("plan") or {}).get("scenes"):
+        return False
+    from engines import prompt_enhancer as pe
+    run["story_intel"] = intel
+    run.update(enhanced_prompt=story_intel.as_brief(intel), agent="drama", agent_label=pe.AGENTS["drama"][0],
+               agent_why=f"episode {n} of {series.get('title') or 'the series'}"[:200])
     return True
 
 
@@ -1242,7 +1379,8 @@ async def rerun(run_id: str, body: Rerun, ctx: PluginContext = Depends(get_plugi
         raise HTTPException(409, "Wait until this run has finished.")
     label = {"analyze": "AI Analyze", "hybrid": "Hybrid", "normal": "Normal", "auto": "Auto", "storyboard": "Storyboard",
              "flow": "Flow Video", "motion": "Motion Video",
-             "presenter": "Presenter", "motion3d": "3D Motion Video"}[body.mode]
+             "presenter": "Presenter", "motion3d": "3D Motion Video", "explainer": "Document Explainer",
+             "programmatic": "Programmatic Film", "documentary": "Documentary"}[body.mode]
     run = _new_run(old["prompt"], body.mode, str(ctx.user_id), message=f"Think again in {label} mode.",
                    conversation_id=old.get("conversation_id") or old["id"])
     run.update(parent_run=run_id, answers=dict(old.get("answers", {})), settings=dict(old.get("settings") or {}),

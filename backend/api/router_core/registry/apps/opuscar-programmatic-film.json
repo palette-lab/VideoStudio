@@ -1,0 +1,85 @@
+{
+  "app_id": "opuscar-programmatic-film",
+  "name": "Programmatic Film",
+  "description": "A whole narrated film drawn in code on this computer, in one of twelve hand-made looks (chalkboard, whiteboard, blueprint, ink wash, paper pop-up, pixel RPG, newsreel, map explainer, data story, isometric infographic, risograph, Swiss motion): the Palette LLM writes the script and the film page, Kokoro speaks it, Lemo-Opuscar's renderer draws every frame in headless Chrome, procedural sound effects and music are mixed and mastered to -14 LUFS.",
+  "status": "available",
+  "verified": false,
+  "execution": {
+    "adapter": "engine",
+    "service_target": "engines/opuscar_engine.py (Lemo-Opuscar renderer, MIT, vendored in tools/opuscar)"
+  },
+  "source": {
+    "repo": "lemomo-ai/lemo-opuscar",
+    "license": "MIT (code only; its CC BY-NC style docs are not used)",
+    "version": "2.0.0",
+    "runtime": "node tools/opuscar/core/render/video.mjs"
+  },
+  "capabilities": [
+    "programmatic.styled_film"
+  ],
+  "capability_status": {
+    "programmatic.styled_film": "confirmed",
+    "video.text_to_video": "unknown",
+    "story.character_consistency": "unknown"
+  },
+  "input_modalities": [
+    "text"
+  ],
+  "input_modalities_status": "confirmed",
+  "capability_requirements": {},
+  "accepts_handoff": [],
+  "emits": [
+    "video_file"
+  ],
+  "best_for": [
+    "a narrated explainer, lesson or story drawn in a distinct graphic look (chalkboard, whiteboard, blueprint, ink wash, pixel art, newsreel, maps, data stories...)",
+    "diagrams, maps and charts that build on the spoken words",
+    "films with no footage and no AI video cost"
+  ],
+  "not_good_for": [
+    "photoreal people, places or live action (use Flow Video or Storyboard & Video)",
+    "editing the user's own footage",
+    "explaining an uploaded document (use the Document Explainer)"
+  ],
+  "fallback_apps": [],
+  "profile": {
+    "shot_structures": {
+      "value": [
+        "multi_scene"
+      ],
+      "status": "confirmed"
+    },
+    "max_duration_s": {
+      "value": 180,
+      "status": "unverified"
+    },
+    "aspect_ratios": {
+      "value": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:5"
+      ],
+      "status": "confirmed"
+    },
+    "motion_styles": {
+      "value": [
+        "programmatic_precise"
+      ],
+      "status": "confirmed"
+    },
+    "accepts_asset_roles": {
+      "value": [],
+      "status": "confirmed"
+    },
+    "audio_output": {
+      "value": [
+        "voiceover",
+        "music",
+        "sound_effects"
+      ],
+      "status": "confirmed"
+    }
+  },
+  "profile_notes": "Added 2026-11-17. Renders locally with the vendored Lemo-Opuscar renderer (Node, playwright-core driving the system Chrome, ffmpeg 7+); narration with Kokoro, sound effects with Opuscar's sfx.py, music with MusicGen. The LLM-written page is refused if it uses network, timers, eval or Math.random, and is checked with stills, Opuscar's reading-time check and a vision review before the render."
+}

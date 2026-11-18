@@ -65,6 +65,22 @@ KOKORO_LANGS = [
     (("portuguese", "pt"), "pt-br", "pf_dora", "pm_alex"),
     (("chinese", "mandarin", "zh"), "cmn", "zf_xiaoxiao", "zm_yunxi"),
 ]
+# Every Kokoro voice per espeak language code and gender (voices-v1.0.bin), the language's default first: a short
+# drama gives each character their own voice.
+KOKORO_POOL = {
+    "en-us": {"female": ["af_heart", "af_bella", "af_nicole", "af_sarah", "af_nova", "af_sky", "af_jessica"],
+              "male": ["am_michael", "am_adam", "am_eric", "am_liam", "am_onyx", "am_puck"]},
+    "en-gb": {"female": ["bf_emma", "bf_isabella", "bf_alice", "bf_lily"],
+              "male": ["bm_george", "bm_lewis", "bm_daniel", "bm_fable"]},
+    "hi": {"female": ["hf_alpha", "hf_beta"], "male": ["hm_omega", "hm_psi"]},
+    "es": {"female": ["ef_dora"], "male": ["em_alex"]},
+    "fr-fr": {"female": ["ff_siwis"], "male": ["ff_siwis"]},
+    "it": {"female": ["if_sara"], "male": ["im_nicola"]},
+    "ja": {"female": ["jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro"], "male": ["jm_kumo"]},
+    "pt-br": {"female": ["pf_dora"], "male": ["pm_alex"]},
+    "cmn": {"female": ["zf_xiaoxiao", "zf_xiaobei", "zf_xiaoni", "zf_xiaoyi"],
+            "male": ["zm_yunxi", "zm_yunjian", "zm_yunxia", "zm_yunyang"]},
+}
 WORDS_PER_S = 2.5
 QUALITY = {  # base clip models: Kling first (720p+ for the lip-sync), Seedance at 720p as the fallback
     "test": {"resolution": "720p", "max_total": 15, "default_total": 12,
@@ -258,6 +274,13 @@ def kokoro_voice(language: str, gender: str) -> tuple[str, str] | None:
     return None
 
 
+def kokoro_pool(language: str) -> dict[str, list[str]] | None:
+    """Every local voice of the script's language, by gender ({"female": [...], "male": [...]}); None if Kokoro does
+    not speak it."""
+    kv = kokoro_voice(language, "female")
+    return KOKORO_POOL.get(kv[0]) if kv else None
+
+
 async def run_local(cmd: list[str], what: str, timeout: int = LOCAL_TIMEOUT_S) -> dict:
     """Run a local model script; its last stdout line is a JSON result."""
     proc = await asyncio.create_subprocess_exec(*map(str, cmd), stdout=asyncio.subprocess.PIPE,
@@ -273,9 +296,13 @@ async def run_local(cmd: list[str], what: str, timeout: int = LOCAL_TIMEOUT_S) -
     return json.loads(lines[-1])
 
 
-async def speak(text: str, gender: str, language: str, key: str, dest: Path, used: list[str]) -> str:
-    """One line of speech as a local file: Kokoro on this machine (free); ElevenLabs on fal only when paid is on."""
+async def speak(text: str, gender: str, language: str, key: str, dest: Path, used: list[str],
+                voice: str | None = None) -> str:
+    """One line of speech as a local file: Kokoro on this machine (free); ElevenLabs on fal only when paid is on.
+    `voice` picks one Kokoro voice of that language (a drama character's own voice)."""
     kv = kokoro_voice(language, gender)
+    if kv and voice and voice in (KOKORO_POOL.get(kv[0]) or {}).get(gender, []):
+        kv = (kv[0], voice)
     problems = []
     if kv and local_ready() is None:
         try:
@@ -437,6 +464,35 @@ def fit_clip(ff: str, clip: str, audio: str, out: str, w: int, h: int, punch_in:
     _run([ff, "-y", "-hide_banner", "-loglevel", "error", "-i", clip, "-i", audio, "-filter_complex", vf,
           "-map", "[v]", "-map", "1:a", "-t", f"{dur:.3f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", out], "Syncing a chunk")
+
+
+async def dialogue_clip(app: dict, clip: str, speech: str, ar: str, resolution: str, work: Path, tag: str,
+                        progress) -> tuple[str, str]:
+    """A short drama's spoken line: the scene's own clip (the speaker on camera) lip-synced to the line in the
+    speaker's voice, at the film's size with exactly that speech. Returns (local path, lip-sync model)."""
+    key, q, ff = story_engine.fal_key(), quality(), _ffmpeg()
+    work.mkdir(parents=True, exist_ok=True)
+    dur = await asyncio.to_thread(video_merge.probe_duration, ff, speech)
+    clip_s = await asyncio.to_thread(video_merge.probe_duration, ff, clip)
+    speech_in = await asyncio.to_thread(pad_speech, ff, speech, dur, str(work / f"{tag}_in.wav"))
+    clip_in = await asyncio.to_thread(window, ff, clip, clip_s, 0, max(dur, CHUNK_MIN_S), str(work / f"{tag}_base.mp4"))
+    await progress(f"{app['name']}: lip-syncing {tag.replace('_', ' ')}")
+    talk, model = await lipsync(clip_in, speech_in, q, key, work / f"{tag}_talk.mp4")
+    w, h = video_merge.dimensions_for(ar, "1080p" if resolution == "1080p" else "720p")
+    out = str(work / f"{tag}.mp4")
+    await asyncio.to_thread(fit_clip, ff, talk, speech, out, w, h, False)
+    return out, model
+
+
+def voice_over(ff: str, clip: str, speech: str, out: str) -> str:
+    """No lip-sync available: the line plays over the scene's clip (held on its last frame if the line is longer)."""
+    dur = video_merge.probe_duration(ff, speech)
+    _run([ff, "-y", "-hide_banner", "-loglevel", "error", "-i", clip, "-i", speech, "-filter_complex",
+          "[0:v]tpad=stop_mode=clone:stop_duration=10[v]", "-map", "[v]", "-map", "1:a",
+          "-t", f"{max(dur, video_merge.probe_duration(ff, clip)):.3f}", "-c:v", "libx264", "-preset", "veryfast",
+          "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", out],
+         "Laying the line over the clip")
+    return out
 
 
 DOC_HOST = {  # a documentary's host: standing in a dim archive room, the film's board softly behind them

@@ -5,7 +5,7 @@ import { useT, examplesFor, type T } from "./i18n"
 import { EditableVideo } from "./textEditor"
 
 // Modes in the menu. Presenter Studio and the HyperFrames Motion Studio stay in the backend (Auto still picks them).
-const MODES = ["auto", "storyboard", "flow", "motion3d", "explainer"]
+const MODES = ["auto", "storyboard", "flow", "motion3d", "documentary", "programmatic"]
 const MODE_IDS = new Set(MODES)
 const BUSY = new Set(["analyzing", "approved", "executing"])
 // Once a plan is approved the video is being made (or was made): these runs get the stage on the right.
@@ -858,7 +858,10 @@ function PlanAnswer({ run, latest, staged, onApprove, onRecover, onSelect, onRer
   return (
     <div className="vr-answer">
       {run.status === "awaiting_approval" && (
-        <p>{names.length > 1 ? <>{t("plan.combine")} <strong>{names.join(" → ")}</strong>.</> : <>{t("plan.use")} <strong>{names[0]}</strong>.</>} {plan.why}</p>
+        <p>{run.mode === "motion3d" && names.length === 1
+          // 3D Motion Video renders on Storyboard & Video: name the mode the user picked, then the app behind it
+          ? <>{t("plan.use")} <strong>{t("modes.motion3d")}</strong> ({t("plan.renderedBy", { app: names[0] })}).</>
+          : names.length > 1 ? <>{t("plan.combine")} <strong>{names.join(" → ")}</strong>.</> : <>{t("plan.use")} <strong>{names[0]}</strong>.</>} {plan.why}</p>
       )}
       {(running || done || failed) && !run.report && <p>{names.length > 1 ? <>{t("plan.running")} <strong>{names.join(" → ")}</strong>…</> : <>{t("plan.running")} <strong>{names[0]}</strong>…</>}</p>}
 

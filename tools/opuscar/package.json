@@ -1,0 +1,7 @@
+{
+  "name": "videostudio-opuscar-runtime",
+  "private": true,
+  "type": "module",
+  "description": "Lemo-Opuscar's MIT renderer (vendored) for VideoStudio's Programmatic Film engine",
+  "dependencies": { "playwright-core": "1.63.0" }
+}

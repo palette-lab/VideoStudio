@@ -1,0 +1,83 @@
+{
+  "app_id": "vox-editorial-documentary",
+  "name": "VOX Documentary",
+  "description": "A VOX-style editorial documentary with NO video model, from the user's Made by AI Playbook: Opus writes the script (1, 5, 8, 12 or 20 minutes) and one editorial image prompt per sentence, the image model paints each paper-collage illustration, the voice model narrates every sentence, Opus plans each image's paper-layer build and transition, and code animates it frame by frame (Lemo-Opuscar's renderer); narration and paper sound effects, no music.",
+  "status": "available",
+  "verified": false,
+  "execution": {
+    "adapter": "engine",
+    "service_target": "engines/vox_doc_engine.py (Lemo-Opuscar renderer, MIT, vendored in tools/opuscar)"
+  },
+  "source": {
+    "repo": "lemomo-ai/lemo-opuscar",
+    "license": "MIT (code only; its CC BY-NC style docs are not used)",
+    "version": "2.0.0",
+    "runtime": "node tools/opuscar/core/render/video.mjs"
+  },
+  "capabilities": [
+    "documentary.editorial_film"
+  ],
+  "capability_status": {
+    "documentary.editorial_film": "confirmed",
+    "video.text_to_video": "unknown",
+    "story.character_consistency": "unknown"
+  },
+  "input_modalities": [
+    "text"
+  ],
+  "input_modalities_status": "confirmed",
+  "capability_requirements": {},
+  "accepts_handoff": [],
+  "emits": [
+    "video_file"
+  ],
+  "best_for": [
+    "documentaries on history, business, countries, economics, technology, science, mysteries and society in the VOX / Johnny Harris editorial paper-collage look",
+    "1 to 20 minute narrated documentaries with no AI video cost"
+  ],
+  "not_good_for": [
+    "live action or photoreal motion (use Storyboard & Video)",
+    "editing the user's own footage",
+    "explaining an uploaded document (use the Document Explainer)"
+  ],
+  "fallback_apps": [],
+  "profile": {
+    "shot_structures": {
+      "value": [
+        "multi_scene"
+      ],
+      "status": "confirmed"
+    },
+    "max_duration_s": {
+      "value": 1260,
+      "status": "unverified"
+    },
+    "aspect_ratios": {
+      "value": [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:5"
+      ],
+      "status": "confirmed"
+    },
+    "motion_styles": {
+      "value": [
+        "programmatic_precise"
+      ],
+      "status": "confirmed"
+    },
+    "accepts_asset_roles": {
+      "value": [],
+      "status": "confirmed"
+    },
+    "audio_output": {
+      "value": [
+        "voiceover",
+        "sound_effects"
+      ],
+      "status": "confirmed"
+    }
+  },
+  "profile_notes": "Added 2026-11-18. Images from the image model (Nano Banana Pro on fal), narration through presenter_engine.speak (Kokoro locally, ElevenLabs when paid voices are on), the animation is a deterministic canvas page played by the vendored Lemo-Opuscar renderer; Opus (DOC_LLM_MODEL) writes the script, image prompts and layer plans."
+}

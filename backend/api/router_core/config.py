@@ -41,6 +41,8 @@ def _clean_base(url: str) -> str:
     return url.rstrip("/")
 
 
+# The Motion Graphics Director always writes on Opus (falls back to the reasoning chain when it is unavailable).
+MOTION_MODEL = os.getenv("MOTION_LLM_MODEL", "anthropic/claude-opus-5.5")
 PREFERRED_MODEL = os.getenv("PALETTE_LLM_MODEL", "")  # e.g. anthropic/claude-opus-5.5 (falls back to palette-llm-max)
 
 

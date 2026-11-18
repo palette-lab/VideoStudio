@@ -161,6 +161,7 @@ def video_request(
     image_references: Optional[list] = None,
     elements: Optional[list] = None,
     audio: Optional[bool] = None,
+    multi_shot: bool = True,
     **kwargs,
 ) -> tuple[str, Dict[str, Any]]:
     """(fal endpoint id, request fields) for a clip on `name` — the same
@@ -232,7 +233,7 @@ def video_request(
         kwargs.pop("elements", None)
     # Kling multi-shot: per-shot prompts whose durations sum to the clip. Not with an end frame (a Flow clip is
     # one continuous shot that must land on it).
-    shots = None if end_image else model_skills.split_shots(
+    shots = None if end_image or not multi_shot else model_skills.split_shots(
         name, prompt, kwargs.get("duration") or _DEFAULT_PAYLOADS.get(name, {}).get("duration"))
     if shots:
         kwargs["multi_prompt"] = shots

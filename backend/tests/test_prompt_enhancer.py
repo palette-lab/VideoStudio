@@ -35,11 +35,22 @@ def test_auto_enhance_only_short_creative_ideas():
 def test_agent_is_picked_and_parsed_with_safe_fallbacks():
     m = pe.auto_messages("make paneer butter masala", 45, "9:16", [])
     assert m[0]["content"].startswith("# Cinematic Video Prompt Enhancer")  # the user's spec stays the base
-    assert '"agent": "food | motion | product | presenter | explainer | story"' in m[0]["content"]
+    assert '"agent": "food | motion | product | presenter | explainer | drama | story"' in m[0]["content"]
     out = pe.parse_auto({"agent": "presenter", "why": "talks to camera", "enhanced_prompt": "A creator..."}, "x")
     assert out == {"agent": "presenter", "label": "Presenter agent", "why": "talks to camera", "prompt": "A creator..."}
     assert pe.parse_auto({"agent": "bogus", "enhanced_prompt": "P"}, "x")["agent"] == "story"
     assert pe.parse_auto({}, "  my words ")["prompt"] == "my words"
+
+
+def test_house_style_rules_reach_every_enhancement():
+    sys_msg = pe.auto_messages("a cat steals a fish", 20, "9:16", [])[0]["content"]
+    assert sys_msg.startswith("# Cinematic Video Prompt Enhancer")  # the user's spec stays first and verbatim
+    assert "HOUSE STYLE" in sys_msg
+    for rule in ("Photoreal", "Never glass, chrome", "fresh look for THIS video", "Characters stay identical",
+                 "No text in the picture", "Text layer:", "fictional host"):
+        assert rule in sys_msg
+    assert sys_msg.index("HOUSE STYLE") < sys_msg.index("OUTPUT FORMAT FOR THIS APP")  # JSON format stays last
+    assert "HOUSE STYLE" in pe.auto_messages(" ".join(["word"] * 60), None, None, [])[0]["content"]
 
 
 def test_food_agent_gets_the_understood_recipe():

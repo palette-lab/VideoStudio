@@ -60,6 +60,23 @@ SCENE-BY-SCENE DETAIL (always, for every film with more than one shot): write it
 - Camera: shot size, angle and one movement.
 - Ends on: the exact last moment, which the next scene picks up.
 - Sound / dialogue: ambience and effects; spoken lines in quotes when someone talks."""
+# The studio's house style: rules the user set across sessions, applied to every enhanced prompt (the user's own
+# words still win where they ask for something else, e.g. a glass look or a sign that must read a certain way).
+HOUSE_STYLE = """
+HOUSE STYLE (always, unless the user's words ask otherwise):
+- Photoreal: everything looks real, with materials true to the subject (skin, fabric, wood, metal, food, paper).
+  Never glass, chrome, clear acrylic, marble or iridescent finishes unless the user asks for them.
+- A fresh look for THIS video: build the art direction, colour palette and light from this topic and its mood,
+  never a stock or default look; keep that look the same in every scene.
+- Characters stay identical: give every person or animal one fixed description at first appearance (age, face,
+  hair, skin, build, wardrobe) and repeat it word for word in every scene they appear in. Uploaded people keep the
+  exact look from their photo.
+- No text in the picture: never describe titles, captions, subtitles, lettering, signs or writing drawn into the
+  image (a real product's own printed label is fine). If the video needs words on screen, add at most one short
+  line per scene as `Text layer: "..."` - one text at a time, never the same words twice, and placed above or
+  beside a person, never over them.
+- Documentary / factual film: a fictional host (never a real person from the story) speaks to camera in the first
+  and the last scene; the scenes in between are narrated in the host's voice."""
 KEEP_DETAIL = """
 THE USER'S PROMPT IS ALREADY DETAILED: keep every one of their details, wording of dialogue, product names,
 numbers, order and style exactly; do not invent a different story. Your job is only to split it into scenes and
@@ -108,6 +125,11 @@ AGENTS = {
                "layered parallax, CGI-style 3D product animation (rotation, macro materials, floating or exploded "
                "parts, cinematic studio light) and tech / SaaS / abstract-concept explainers - under one STYLE LOCK "
                "(HEX palette, type, light, materials, motion principles)."),
+    "drama": ("Short Drama agent",
+              "a vertical short drama (micro-drama) episode: a hook line or confrontation in the first 3 s, characters "
+              "who want opposite things, sharp spoken dialogue - every line its own shot framed on its speaker, "
+              "reaction shots between - one reversal, and a cliffhanger ending; from a novel or story text, its plot, "
+              "names and relationships are kept. Several episodes asked for: plan them, write episode 1."),
     "story": ("Story agent",
               "a cinematic story: characters, what they want, the obstacle, the climax and the ending, each scene a "
               "real event, with camera, light, sound and atmosphere in service of the story."),
@@ -123,11 +145,13 @@ abstract concept, or a product best shown as a 3D / CGI studio animation (floati
 macro materials) -> "motion", even when the user never wrote "3D" or "motion graphics". A real-world product reel
 with no person (ingredient worlds, hands, textures) -> "product". Someone talking to the camera (UGC, review,
 testimonial, YouTube host) -> "presenter". Teaching how something works with real footage -> "explainer".
+A short drama, micro-drama, web series, episodes, or a novel / chapter to adapt, characters talking to each other
+-> "drama".
 Otherwise -> "story". Never change what the user asked for; keep every number exactly.
 
 OUTPUT FORMAT FOR THIS APP: return ONLY a JSON object (it replaces the plain-text output rule above; the
 "enhanced_prompt" value itself follows every Output Requirement above):
-{"agent": "food | motion | product | presenter | explainer | story", "why": "one short reason",
+{"agent": "food | motion | product | presenter | explainer | drama | story", "why": "one short reason",
  "enhanced_prompt": "the complete, generation-ready enhanced prompt"}"""
 
 RECIPE_CONTEXT = """
@@ -141,7 +165,7 @@ def auto_messages(prompt: str, duration_s: float | None, aspect_ratio: str | Non
                   recipe: dict | None = None) -> list[dict]:
     msgs = messages(prompt, duration_s, aspect_ratio, files)
     guides = "\n".join(f"- {k}: {label} - {text}" for k, (label, text) in AGENTS.items())
-    msgs[0]["content"] += "\n\n" + SCENE_DETAIL + AGENT_RULES.replace("{AGENTS}", guides)
+    msgs[0]["content"] += "\n\n" + SCENE_DETAIL + HOUSE_STYLE + AGENT_RULES.replace("{AGENTS}", guides)
     if len((prompt or "").split()) >= DETAILED_WORDS:  # the user's own detailed brief: kept, only split and detailed
         msgs[0]["content"] += "\n\n" + KEEP_DETAIL
     if recipe:

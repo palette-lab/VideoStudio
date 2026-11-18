@@ -61,7 +61,9 @@ def chain() -> list[str]:
 
 
 def pick_model(model: str, skip: set[str] | frozenset = frozenset()) -> str:
-    if model != UPGRADE_FROM:
+    if model != UPGRADE_FROM:  # a model asked for by name: there is no chain to move along, so fail fast
+        if model in skip or _down_until.get(model, 0) > time.time():
+            raise LLMError(f"{model} is not available for this key")
         return model
     now = time.time()
     return next((m for m in chain() if m not in skip and _down_until.get(m, 0) <= now), UPGRADE_FROM)

@@ -97,9 +97,179 @@ def normalize(items: list, duration: float) -> list[dict]:
     return sorted(out, key=lambda x: (x["start"], x["y"]))
 
 
-def layer(items: list, width: int, height: int, duration: float) -> dict:
+def layer(items: list, width: int, height: int, duration: float, tidy: bool = False,
+          faces: list[dict] | None = None) -> dict:
+    """The text layer. tidy=True (a layer the engine made, not the user's own edits) also lays it out: one text at a
+    time, never over a face (declutter)."""
+    clean = normalize(items, duration)
+    if tidy:
+        clean = declutter(clean, width, height, faces)
     return {"version": 1, "width": width, "height": height, "duration": round(duration, 2),
-            "items": normalize(items, duration), "css": CSS, "fonts": FONTS}
+            "items": clean, "css": CSS, "fonts": FONTS}
+
+
+# ---------------------------------------------------------------------------------------------- layout
+
+MAX_LINES = 3
+MIN_SIZE = 3.2
+SLOTS_Y = (16, 30, 45, 60)
+PRIORITY = {"caption": 0, "hook": 1, "end_title": 2, "keyword": 3, "title": 4, "end_line": 5, "cta": 5}
+CENTRED = set(KINDS) - {"caption"}  # every text sits in the middle of the frame, stacked top to bottom
+MARGIN = 5.0  # % kept clear at every edge
+
+
+def _same_words(a: str, b: str) -> bool:
+    """One text repeats the other (same words, or one inside the other): show it once."""
+    na, nb = (" ".join(re.findall(r"\w+", t.lower())) for t in (a, b))
+    return bool(na and nb) and (na == nb or na in nb or nb in na)
+
+
+def _inside(it: dict, width: int, height: int) -> dict:
+    """Moved sideways so the whole text stays inside the frame, MARGIN from each edge."""
+    l, _, r, _ = box(it, width, height)
+    if l < MARGIN:
+        it["x"] = round(it["x"] + MARGIN - l, 2)
+    elif r > 100 - MARGIN:
+        it["x"] = round(it["x"] - (r - (100 - MARGIN)), 2)
+    it["w"] = min(it["w"], 100 - 2 * MARGIN)
+    return it
+
+
+def _lines(it: dict, width: int, height: int) -> int:
+    """About how many lines the item wraps into (bold display letters are ~0.55 of their height wide)."""
+    per_line = max(1, int((it["w"] / 100 * width) / (0.55 * it["size"] / 100 * height)))
+    n = 0
+    for para in it["text"].split("\n"):
+        words, cur = para.split() or [""], 0
+        n += 1
+        for wd in words:
+            if cur and cur + 1 + len(wd) > per_line:
+                n, cur = n + 1, len(wd)
+            else:
+                cur += (1 if cur else 0) + len(wd)
+    return n
+
+
+def box(it: dict, width: int, height: int) -> tuple[float, float, float, float]:
+    """The item's box in % of the frame: (left, top, right, bottom); x / y are its centre."""
+    h = _lines(it, width, height) * it["size"] * 1.08 + (it["size"] * 0.36 if it.get("bg") else 0)
+    longest = max(len(p) for p in it["text"].split("\n"))
+    w = min(it["w"], longest * 0.55 * it["size"] * height / width + 1)
+    return it["x"] - w / 2, it["y"] - h / 2, it["x"] + w / 2, it["y"] + h / 2
+
+
+def _hit(a, b, pad: float = 1.5) -> bool:
+    return not (a[2] + pad <= b[0] or b[2] + pad <= a[0] or a[3] + pad <= b[1] or b[3] + pad <= a[1])
+
+
+def _together(a: dict, b: dict) -> bool:
+    return a["start"] < b["end"] and b["start"] < a["end"]
+
+
+END_CARD = {"end_title", "end_line", "cta"}  # shown together as one card
+FACE_PAD = 3.0  # % kept clear around a face
+SHRINK = (1.0, 0.8, 0.65, 0.5)  # a text that does not fit gets smaller, never smaller than MIN_SIZE
+SIDE_SHRINK = (0.8, 0.65, 0.5)  # beside a person the text is always a little smaller
+
+
+def _face_boxes(faces: list[dict] | None, it: dict) -> list[tuple]:
+    """The whole person to keep clear: the face (with the hair) and the body below it - wider than the face and
+    about three face-heights down - plus a small margin."""
+    out = []
+    for f in faces or []:
+        if not (f["start"] < it["end"] and it["start"] < f["end"]):
+            continue
+        l, t, r, b = f["box"]
+        fw, fh = r - l, b - t
+        out.append((max(0.0, l - 0.4 * fw) - FACE_PAD, t - FACE_PAD, min(100.0, r + 0.4 * fw) + FACE_PAD,
+                    min(100.0, b + 3 * fh) + FACE_PAD))
+    return out
+
+
+def _fit_lines(it: dict, width: int, height: int) -> dict:
+    """Wider first, then smaller, then only its first line, until it needs at most MAX_LINES (+1 for a card)."""
+    most = MAX_LINES + (1 if "\n" in it["text"] else 0)
+    while _lines(it, width, height) > most:
+        if it["w"] < 100 - 2 * MARGIN:
+            it["w"] = min(100 - 2 * MARGIN, it["w"] + 10)
+        elif it["size"] > MIN_SIZE:
+            it["size"] = round(max(MIN_SIZE, it["size"] * 0.9), 2)
+        elif "\n" in it["text"]:
+            it["text"] = it["text"].split("\n")[0]
+        else:
+            break
+    return it
+
+
+def _spots(it: dict, faces: list[tuple], width: int, height: int):
+    """Where the text may go, best first: centred at its own height, the standard heights or just above each head -
+    from full size down to half; then beside each person (the free side of the frame), smaller."""
+    for f in SHRINK:
+        base = _fit_lines({**it, "size": max(MIN_SIZE, round(it["size"] * f, 2))}, width, height)
+        h = box(base, width, height)[3] - box(base, width, height)[1]
+        ys = [it["y"]] + [y for y in SLOTS_Y if y != it["y"]] + [fb[1] - h / 2 - 1 for fb in faces]
+        for y in ys:
+            yield {**base, "x": 50.0 if it["kind"] in CENTRED else it["x"], "y": round(y, 2)}
+    for f in SIDE_SHRINK:
+        size = max(MIN_SIZE, round(it["size"] * f, 2))
+        for fb in faces:
+            for lo, hi in ((MARGIN, fb[0] - 1), (fb[2] + 1, 100 - MARGIN)):
+                if hi - lo < 18:
+                    continue
+                side = {**it, "size": size, "w": round(hi - lo, 2), "x": round((lo + hi) / 2, 2)}
+                if _lines(side, width, height) > MAX_LINES + (1 if "\n" in it["text"] else 0):
+                    continue
+                for y in [fb[1] + 6, (fb[1] + fb[3]) / 2] + list(SLOTS_Y):
+                    yield {**side, "y": round(y, 2)}
+
+
+def declutter(items: list[dict], width: int, height: int, faces: list[dict] | None = None) -> list[dict]:
+    """The engine's text, kept clean:
+    - one text on screen at a time (captions apart; an end card's lines count as one), placed by importance (hook,
+      end title, key words, then callouts and labels); a later one waits until the screen is free, else is left out;
+    - the same words never twice; every text inside the frame, at most MAX_LINES lines, captions keep their band;
+    - never over a face: faces ({"start", "end", "box": (left, top, right, bottom) in %}) are kept clear - the text
+      goes above the head or beside the person, smaller when it must."""
+    out: list[dict] = []
+    band = [box(c, width, height) for c in items if c["kind"] == "caption"]
+    band_top = min((b[1] for b in band), default=100.0)
+    for it in sorted(items, key=lambda i: (PRIORITY.get(i["kind"], 6), i["start"])):
+        it = dict(it)
+        if it["kind"] == "caption":
+            out.append(it)
+            continue
+        if any(o["kind"] != "caption" and _together(o, it) and _same_words(o["text"], it["text"]) for o in out):
+            continue  # already on screen
+        if it["kind"] in CENTRED:
+            it["x"] = 50.0
+        it["w"] = min(it["w"], 100 - 2 * MARGIN)
+        it = _inside(_fit_lines(it, width, height), width, height)
+
+        def blockers(cand: dict) -> list[dict]:
+            """What stops this text here: another text on screen at that time, or the frame / captions edge."""
+            b = box(cand, width, height)
+            if b[0] < MARGIN - 0.01 or b[2] > 100 - MARGIN + 0.01 or b[1] < MARGIN or b[3] > min(100 - MARGIN, band_top - 1):
+                return [{"end": cand["end"]}]
+            card = cand["kind"] in END_CARD
+            return [o for o in out if o["kind"] != "caption" and _together(o, cand)
+                    and (not (card and o["kind"] in END_CARD) or _hit(box(o, width, height), b))]
+
+        def place(at: dict) -> dict | None:
+            faces_now = _face_boxes(faces, at)
+            for cand in _spots(at, faces_now, width, height):
+                b = box(cand, width, height)
+                if not blockers(cand) and not any(_hit(fb, b, 0) for fb in faces_now):
+                    return cand
+            return None
+
+        placed = place(it)
+        if placed is None:  # the screen is taken: start when the text before it has gone, if time is left
+            later = max([o["end"] for o in out if o["kind"] != "caption" and _together(o, it)] or [it["start"]]) + 0.1
+            if it["end"] - later >= MIN_S:
+                placed = place({**it, "start": round(later, 2)})
+        if placed is not None:
+            out.append(placed)
+    return sorted(out, key=lambda x: (x["start"], x["y"]))
 
 
 # ---------------------------------------------------------------------------------------------- building the layer
@@ -129,23 +299,22 @@ SPOTS = {"top": (50, 16), "top_left": (28, 16), "top_right": (72, 16), "middle":
 
 
 def from_graphics(gp: dict, duration: float, accent: str = "#FFD84D", style: str = "3d",
-                  captions_band: tuple[float, float] | None = None) -> list[dict]:
-    """The graphics director's plan (hook, overlays, end card) as editable text items. Shapes without words
-    (accents, arrows, rings) are not text and are left out."""
+                  captions_band: tuple[float, float] | None = None, words_owned: bool = False) -> list[dict]:
+    """The graphics director's plan (hook, overlays, end card) as editable text items, all in the hook's look: 3D
+    letters, no background panels. Shapes without words (accents, arrows, rings) are not text and are left out.
+    words_owned: the scenes carry their own key words (3D motion graphics, documentaries), so only the end card is
+    added - a hook and overlays on top would repeat them."""
     accent = _hex(((gp.get("design") or {}).get("accent")) or accent, "#FFD84D")
     out, n = [], 0
-    hook = gp.get("hook") or {}
+    hook = {} if words_owned else (gp.get("hook") or {})
     if hook.get("text"):
         a = _clamp(hook.get("start"), 0, duration, 0.2)
         e = _clamp(hook.get("end"), a + MIN_S, duration, min(duration, a + 2.6))
         out.append(item("hook", str(hook["text"]), a, e, 50, 18, 86, 9, "#FFFFFF", style, "display", "pop", n=n))
         n += 1
-        if hook.get("sub"):
-            out.append(item("title", str(hook["sub"]), a + 0.2, e, 50, 28, 80, 4.2, accent, "flat", "display",
-                            "rise", n=n))
-            n += 1
+        # (the hook's sub-line is left out: fewer words on screen)
     low = captions_band[0] if captions_band else 100
-    for o in gp.get("overlays") or []:
+    for o in ([] if words_owned else gp.get("overlays") or []):
         words = str(o.get("text") or o.get("value") or "").strip()
         if not words or o.get("kind") in ("accent", "arrow", "highlight", "sweep", "guide", "circuit"):
             continue
@@ -165,20 +334,19 @@ def from_graphics(gp: dict, duration: float, accent: str = "#FFD84D", style: str
                 "callout": "callout", "label": "label", "part_label": "label", "measure": "label",
                 "compare": "label"}.get(o.get("kind"), "keyword")
         big = kind == "keyword"
-        out.append(item(kind, words, a, e, x, y, 70 if big else 40, 7 if big else 3.6,
-                        "#FFFFFF" if big else "#111111", style if big else "flat", "display",
-                        "pop" if big else "rise", "" if big else "#FFFFFF", n=n))
+        out.append(item(kind, words, a, e, x, y, 70 if big else 64, 7 if big else 4.2, "#FFFFFF", style, "display",
+                        "pop" if big else "rise", n=n))
         n += 1
     card = gp.get("end_card") or {}
     if card.get("title"):
         a = _clamp(card.get("start"), 0, max(0.0, duration - MIN_S), max(0.0, duration - 3))
         out.append(item("end_title", str(card["title"]), a, duration, 50, 42, 84, 8, "#FFFFFF", style, n=n))
         n += 1
-        for k, y in (("line", 54), ("cta", 64)):
+        for k, y in (("cta", 60),):  # the title and its call to action; no extra line
             if card.get(k):
                 out.append(item("end_line" if k == "line" else "cta", str(card[k]), a + 0.25, duration, 50, y, 80,
-                                3.8 if k == "line" else 4.2, accent if k == "cta" else "#FFFFFF", "flat", "display",
-                                "rise", "#111111" if k == "cta" else "", n=n))
+                                3.8 if k == "line" else 4.6, accent if k == "cta" else "#FFFFFF", style, "display",
+                                "rise", n=n))
                 n += 1
     return out
 
@@ -298,6 +466,65 @@ def frame_size(aspect_ratio: str) -> tuple[int, int]:
 
 # ---------------------------------------------------------------------------------------------- the editable finish
 
+FACES = """This is one frame of a video. Find every visible FACE or HEAD: real people, statues, figurines, dolls,
+cartoon, 3D or animated characters, animals' heads, and heads seen from behind or in profile.
+For each, give its box in PERCENT of the frame (0-100): "left" and "top" are the box's top-left corner, "width" and
+"height" its size. Include the hair. Return ONLY JSON {"faces": [{"left": .., "top": .., "width": .., "height": ..}]};
+{"faces": []} when there is none."""
+FACE_SAMPLE_S = 3.0
+FACE_MAX_FRAMES = 20
+
+
+async def faces_in(video: str, duration: float, work: Path, spans: list | None = None) -> list[dict]:
+    """Where faces are on screen over time ({"start", "end", "box"} in % of the frame), from one frame per scene
+    (or one every FACE_SAMPLE_S seconds) checked by the vision model. Best effort: [] when it cannot look."""
+    from router_core import config, llm
+    from .vendor.flow import video_merge
+    ff = video_merge.find_ffmpeg()
+    if not ff or duration <= 0:
+        return []
+    if spans:
+        windows = [(float(a), float(b)) for a, b in spans if b > a]
+    else:
+        n = max(1, min(FACE_MAX_FRAMES, int(duration // FACE_SAMPLE_S) + 1))
+        step = duration / n
+        windows = [(k * step, min(duration, (k + 1) * step)) for k in range(n)]
+    windows = windows[:FACE_MAX_FRAMES]
+    out_dir = work / "faces"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    gate = asyncio.Semaphore(4)
+
+    async def one(k: int, a: float, b: float) -> list[dict]:
+        frame = out_dir / f"f{k:02d}.jpg"
+        t = a + (b - a) * 0.5
+        proc = await asyncio.create_subprocess_exec(ff, "-y", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", video,
+                                                    "-frames:v", "1", "-vf", "scale=-2:512", "-q:v", "4", str(frame))
+        await proc.wait()
+        if not frame.exists():
+            return []
+        async with gate:
+            try:
+                data = await llm.chat_json(config.VISION_MODEL, [{"role": "user", "content": [
+                    {"type": "text", "text": FACES}, llm.image_part(frame)]}], max_tokens=600,
+                    reasoning_effort="low", stage="engine.text.faces")
+            except Exception:  # no face map: the layout still keeps one text at a time
+                return []
+        found = []
+        for f in data.get("faces") or []:
+            try:
+                l, tp = float(f["left"]), float(f["top"])
+                w, h = float(f["width"]), float(f["height"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if w > 0 and h > 0:
+                found.append({"start": round(a, 2), "end": round(b, 2),
+                              "box": (max(0.0, l), max(0.0, tp), min(100.0, l + w), min(100.0, tp + h))})
+        return found
+
+    got = await asyncio.gather(*(one(k, a, b) for k, (a, b) in enumerate(windows)))
+    return [f for fs in got for f in fs]
+
+
 async def finish(app: dict, brief: str, plan: dict, video: str, scene_paths: list[str], narration: list[str],
                  aspect_ratio: str, work: Path, progress, effects_style: str | None = None, level: str = "full",
                  scene_words: list[dict] | None = None, spans: list | None = None, do_effects: bool = True,
@@ -339,12 +566,16 @@ async def finish(app: dict, brief: str, plan: dict, video: str, scene_paths: lis
                         "invented_specs": [str(x) for x in gp.get("invented_specs") or []]}
         except Exception as e:
             graphics = {"error": str(e)[:300]}
-    items = from_graphics(gp, dur, captions_band=band if captions_on and segs else None) if gp else []
-    if scene_words and spans:
-        items += from_scene_words(scene_words, spans, style=words_style)
+    words = from_scene_words(scene_words, spans, style=words_style) if scene_words and spans else []
+    items = from_graphics(gp, dur, captions_band=band if captions_on and segs else None,
+                          words_owned=bool(words)) if gp else []
+    items += words
     if captions_on and segs:
         items += captions(segs, band)
-    lay = layer(items, w, h, dur)
+    faces = await faces_in(clean, dur, work, spans) if any(i["kind"] != "caption" for i in items) else []
+    if faces:
+        await progress(f"{name}: keeping the text off {len(faces)} face{'s' if len(faces) > 1 else ''}")
+    lay = layer(items, w, h, dur, tidy=True, faces=faces)
     await progress(f"{name}: {len(lay['items'])} editable texts")
     final = await burn(clean, lay, work / "text", progress, name)
     return {"path": final, "clean": clean, "text_layer": lay, "effects": effects, "graphics": graphics}

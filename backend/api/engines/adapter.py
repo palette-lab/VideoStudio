@@ -6,7 +6,7 @@ from pathlib import Path
 from router_core import config, registry
 from router_core.execution import RunDeleted
 
-from . import effects_engine, explainroo_engine, genres, motion_engine, music, presenter_engine, story_engine
+from . import effects_engine, explainroo_engine, genres, motion_engine, music, opuscar_engine, presenter_engine, story_engine, vox_doc_engine
 
 GENERATE_PREFIXES = ("story.", "video.", "fashion.")
 # Edits this adapter really performs on existing footage (anything else fails honestly instead of a fake success).
@@ -51,6 +51,34 @@ class EngineAdapter:
                                      "story": a.get("angle") or "", "genre": "Document explainer",
                                      "subtitles_path": out.get("subtitles"), "chapters_path": out.get("chapters"),
                                      "cover_path": out.get("cover"), "script": out.get("script") or ""}]}
+            if app["app_id"] == vox_doc_engine.APP_ID:  # a VOX documentary: images + voice, animated in code
+                t0 = time.time()
+                out = await vox_doc_engine.run(app, step.get("handoff") or {"prompt": "", "request": {}}, work, prog)
+                return {"status": "succeeded", "mock": False,
+                        "message": (f"{app['name']} made “{out['title'] or 'the documentary'}”: "
+                                    f"{out['duration_s'] / 60:.1f} min, {len(out['scenes'])} illustrated scenes in "
+                                    f"{time.time() - t0:.0f} s"
+                                    + (f", narrated ({', '.join(out['voice'])})" if out["voice"] else ", no narration")
+                                    + f", {out['sfx']} paper sound effects, no music."
+                                    + (f" {out['missing_images']} scene image(s) failed and show the empty paper."
+                                       if out["missing_images"] else "")),
+                        "outputs": [{"format": "video_file", "ref": f"file://{out['path']}", "path": out["path"],
+                                     "duration_s": out["duration_s"], "title": out["title"],
+                                     "story": out.get("visual_bible") or "", "genre": "VOX editorial documentary",
+                                     "subtitles_path": out.get("subtitles"), "script": out.get("script") or ""}]}
+            if app["app_id"] == opuscar_engine.APP_ID:  # a whole film drawn in code (Lemo-Opuscar's renderer)
+                t0 = time.time()
+                out = await opuscar_engine.run(app, step.get("handoff") or {"prompt": "", "request": {}}, work, prog)
+                return {"status": "succeeded", "mock": False,
+                        "message": (f"{app['name']} made “{out['title'] or 'the film'}” in the {out['style_name']} "
+                                    f"look: {out['duration_s']:.1f} s in {time.time() - t0:.0f} s"
+                                    + (f", narrated ({', '.join(out['voice'])})" if out["voice"] else ", no narration")
+                                    + f", {out['sfx']} sound effects" + (", music" if out["music"] else "") + "."
+                                    + (f" Notes left after the fixes: {len(out['checks'])}." if out["checks"] else "")),
+                        "outputs": [{"format": "video_file", "ref": f"file://{out['path']}", "path": out["path"],
+                                     "duration_s": out["duration_s"], "title": out["title"],
+                                     "story": out.get("why_style") or "", "genre": f"Programmatic film ({out['style_name']})",
+                                     "subtitles_path": out.get("subtitles"), "script": out.get("script") or ""}]}
             if app["app_id"] == "palette-effects-studio":
                 videos = [i for i in inputs if i["format"] == "video_file"]
                 if not videos or any(not i.get("path") for i in videos):
@@ -216,7 +244,8 @@ class EngineAdapter:
         except RunDeleted:
             raise
         except (story_engine.EngineError, motion_engine.MotionError, effects_engine.EffectsError,
-                presenter_engine.PresenterError, explainroo_engine.ExplainerError) as e:
+                presenter_engine.PresenterError, explainroo_engine.ExplainerError, opuscar_engine.ProgrammaticError,
+                vox_doc_engine.DocumentaryError) as e:
             return {"status": "failed", "mock": False, "message": f"{app['name']}: {e}"}
         except Exception as e:  # a provider error is a failure, never a success
             return {"status": "failed", "mock": False, "message": f"{app['name']} failed: {type(e).__name__}: {str(e)[:400]}"}

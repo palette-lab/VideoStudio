@@ -99,6 +99,7 @@ def test_regenerate_keeps_neighbours(monkeypatch):
 
 
 def test_develop_runs_the_agents_in_order(monkeypatch):
+    monkeypatch.setattr(story_intel, "VOX_DOCUMENTARIES", False)  # the cinematic method
     calls = []
 
     async def fake(model, messages, **kw):
@@ -198,16 +199,136 @@ def test_motion_director_output_becomes_a_story_plan():
     bad = motion.to_plan({**raw, "scenes": [mg_scene(1, " ".join(["word"] * 16), "not in line here at all")]})
     found = " ".join(i["problem"] for i in motion.lint(bad))
     assert "16 words" in found and "over 4 words" in found and "not taken from the line" in found
-    # Realistic look: glass / chrome / marble are flagged for revision unless the user asked for them.
-    shiny = mg_scene(1)
-    shiny["keyframe_prompt"] = "a clear glass brain with a polished chrome arm on a marble plinth"
-    glassy = motion.to_plan({**raw, "scenes": [shiny]})
-    found = " ".join(i["problem"] for i in motion.lint(glassy))
-    assert "stylised materials" in found and "glass" in found and "chrome" in found and "marble" in found
-    assert motion.lint(glassy, stylized_ok=True) == []
-    assert motion.wants_stylized("a glass brain ad") and not motion.wants_stylized("how habits form in the brain")
+    # the playbook's look (neon teal accents, translucent background lines) is not flagged
+    neon = mg_scene(1)
+    neon["keyframe_prompt"] = "neon teal dashed orbit, two translucent diagonal background lines"
+    assert motion.lint(motion.to_plan({**raw, "scenes": [neon]})) == []
+    block = json.loads(story_intel.engine_block(intel))
+    assert len(block["scenes"]) == 2 and "SUBJECT:" in block["scenes"][0]["video_prompt"] and block["bible"]
+    q = {"video_model": "kling_3_0_pro", "image_model": "nano_banana_pro", "audio": True}
+    system, user = planners.prompt_for("pltt-storyboard-video-maker", "rabbit vs tortoise", 12, "9:16", 3, 10, 2, [], q,
+                                       approved=intel)
+    assert "APPROVED STORY" in system and "render exactly this" in user and "The Nap" in user
+
+
+def test_regenerate_keeps_neighbours(monkeypatch):
+    intel = {"classification": {"duration_s": 18}, "plan": plan([scene(1), scene(2), scene(3)])}
+    seen = {}
+
+    async def fake(model, messages, **kw):
+        seen["ctx"] = json.loads(messages[1]["content"])
+        return {**scene(2), "title": "New nap", "n": 99}
+    monkeypatch.setattr(story_intel.llm, "chat_json", fake)
+    asyncio.run(story_intel.regenerate_scene(intel, 2, "make him trip first"))
+    assert seen["ctx"]["previous_scene"]["n"] == 1 and seen["ctx"]["next_scene"]["n"] == 3
+    assert seen["ctx"]["instruction"] == "make him trip first"
+    assert intel["plan"]["scenes"][1]["title"] == "New nap" and intel["plan"]["scenes"][1]["n"] == 2
+
+
+def test_develop_cinematic_documentary_with_a_host(monkeypatch):  # the older method, with VOX switched off
+    monkeypatch.setattr(story_intel, "VOX_DOCUMENTARIES", False)
+    calls = []
+
+    async def fake(model, messages, **kw):
+        stage = kw["stage"]
+        calls.append(stage)
+        if stage == "story.classify":
+            return {"category": "documentary", "agent": "story", "research": "deep", "research_queries": ["Titanic"],
+                    "subject": "Titanic", "duration_s": 18}
+        if stage == "story.research":
+            assert "SOURCE: Titanic" in messages[1]["content"]
+            return {"summary": "sank 1912", "facts": [{"claim": "sank 15 April 1912", "source": "Titanic"}]}
+        if stage.startswith("story.documentary"):  # a documentary: the cinematic-skill master prompt directs it
+            system = messages[0]["content"]
+            assert "CINEMATIC DOCUMENTARY & PRESENTATION FILM MASTER PROMPT" in system and '"hit_word"' in system
+            assert '"archive": ["A1"]' in system and "A1: RMS Titanic departing Southampton (1912)" in messages[1]["content"]
+            assert "PRESENTED by a host" in system
+            doc = dict(hero="the pinned photo of the ship", hit_word="sure", overlay_text="APRIL 1912", archive=["A1"])
+            host = dict(host=True, hero="the host", audio={"type": "dialogue", "speaker": "Host",
+                                                           "line": "One night in April, an unsinkable ship sank."})
+            return plan([scene(1, **host), scene(2, **doc), scene(3, **host)], look="wall",
+                        host={"look": "woman in her forties, dark coat", "setting": "archive room",
+                              "voice_gender": "female"},
+                        fact_notes=[{"claim": "sank 1912", "source": "Titanic"}])
+        if stage == "story.validate":
+            assert "CINEMATIC DOCUMENTARY plan" in messages[0]["content"]
+            return {"score": 90, "pass": True, "issues": []}
+        raise AssertionError(stage)
+
+    async def fake_gather(queries, lang="en"):
+        return [{"title": "Titanic", "url": "https://en.wikipedia.org/wiki/Titanic", "text": "RMS Titanic sank.",
+                 "kind": "wikipedia"}]
+    async def fake_archive(queries, limit=8):
+        assert queries == ["Titanic"]
+        return [{"id": "A1", "what": "RMS Titanic departing Southampton", "date": "1912", "license": "Public domain",
+                 "url": "https://upload.wikimedia.org/t.jpg", "source": "https://commons.wikimedia.org/wiki/File:T.jpg",
+                 "credit": "F.G.O. Stuart", "title": "File:T.jpg"}]
+    monkeypatch.setattr(story_intel.llm, "chat_json", fake)
+    monkeypatch.setattr(story_intel.research_, "gather", fake_gather)
+    monkeypatch.setattr(story_intel.research_, "archive_photos", fake_archive)
+    intel = asyncio.run(story_intel.develop("history of the titanic", duration_s=None))
+    assert calls == ["story.classify", "story.research", "story.documentary", "story.validate"]
+    assert intel["mode"] == "cinematic_doc"
+    block = json.loads(story_intel.engine_block(intel))
+    assert "cinematic documentary, 'wall' look" in block["mode"] and block["scenes"][0]["hero"]
+    assert block["scenes"][1]["archive"] == ["A1"] and block["archive"][0]["id"] == "A1"
+    assert block["scenes"][0]["host"] and block["host"]["voice_gender"] == "female" and "presenter on camera" in block["mode"]
+    assert "opened and closed by a host" in story_intel.as_brief(intel)
+    assert intel["archive"][0]["credit"] == "F.G.O. Stuart"
+    assert "cinematic documentary in the 'wall' look" in story_intel.as_brief(intel)
+    assert intel["validation"]["passed"] and intel["research"]["sources"][0]["url"].endswith("Titanic")
+
+
+def test_food_requests_are_left_to_the_recipe_engine(monkeypatch):
+    async def fake(model, messages, **kw):
+        return {"category": "other", "agent": "food", "duration_s": 45}
+    monkeypatch.setattr(story_intel.llm, "chat_json", fake)
+    intel = asyncio.run(story_intel.develop("chicken biryani"))
+    assert intel["skipped"] and "plan" not in intel
+
+
+@pytest.mark.skipif(not shutil.which("pdftotext") or not shutil.which("cupsfilter"), reason="needs poppler + cupsfilter")
+def test_pdf_text_is_read(tmp_path):
+    src = tmp_path / "apollo.txt"
+    src.write_text("Apollo 11 landed on the Moon on 20 July 1969.")
+    pdf = tmp_path / "apollo.pdf"
+    with pdf.open("wb") as fh:
+        subprocess.run(["cupsfilter", str(src)], stdout=fh, stderr=subprocess.DEVNULL, check=True)
+    assert "Apollo 11 landed" in research.document_text(str(pdf))
+    assert research.document_text(str(src)).startswith("Apollo 11")
+
+
+def mg_scene(n, line="Your brain spends money before you do.", words="spends money"):
+    return {"n": n, "beat": f"B{n:02d}", "script_line": line, "duration_s": 5, "visual_concept": f"concept {n}",
+            "hero_subject": "a ceramic piggy bank", "keyframe_prompt": "a matte ceramic piggy bank on a paper grid " * 8,
+            "typography_text": words, "typography_style": "extruded black sans", "three_d_elements": "glazed ceramic, paper",
+            "graphic_elements": "dashed lines", "composition": "hero centre, type top third", "lighting": "soft key",
+            "color": "palette 1", "method": "both", "end_frame": "the bank tilts left",
+            "motion": {"hero_object_motion": "the bank rotates 30 degrees and coins rise " * 3, "camera": f"dolly-in {n}",
+                       "transition_out": "mask wipe", "sfx": "coin clicks",
+                       "timeline": [{"t": "0.0-0.5", "what": "OPEN"}, {"t": "0.5-3.5", "what": "BUILD"}]}}
+
+
+def test_motion_director_output_becomes_a_story_plan():
+    from engines.story_intel import motion
+    raw = {"title": "Why We Overspend", "objective": "explain mental accounting",
+           "script": "Your brain spends money before you do.", "palette": {"option": 2, "why": "tech"},
+           "beats": [{"id": "B01", "line": "Your brain spends money before you do.", "role": "hook"}],
+           "scenes": [mg_scene(1), mg_scene(2, "It labels cash into invisible jars.", "invisible jars")]}
+    plan = motion.to_plan(raw)
+    s = plan["scenes"][0]
+    assert s["audio"]["line"] == "Your brain spends money before you do." and s["overlay_text"] == "spends money"
+    assert s["in_scene_text"] == ""  # no letters drawn into the keyframe: the words are the editable text layer
+    assert s["on_screen_text"] == ""  # full 3D: the words are 3D letters in the keyframe, never a flat overlay
+    assert s["motion_gfx"]["keyframe_prompt"] and "Dark Technical Minimal" in plan["style"]["look"]
+    assert plan["motion_graphics"]["palette"]["option"] == 2 and plan["motion_graphics"]["connection"] == "S01 -> S02"
+    assert motion.lint(plan) == []
+    bad = motion.to_plan({**raw, "scenes": [mg_scene(1, " ".join(["word"] * 16), "not in line here at all")]})
+    found = " ".join(i["problem"] for i in motion.lint(bad))
+    assert "16 words" in found and "over 4 words" in found and "not taken from the line" in found
     block = json.loads(story_intel.engine_block({"mode": "motion_graphics", "plan": plan}))
-    assert block["mode"].startswith("full 3D motion graphics") and block["scenes"][0]["keyframe_prompt"]
+    assert block["mode"].startswith("mixed-media kinetic editorial motion graphics") and block["scenes"][0]["keyframe_prompt"]
+    assert "no music" in block["mode"] and "voice-over" in block["mode"]
     assert block["scenes"][0]["overlay_text"] == "spends money" and "editable text layer" in block["mode"]
     assert "NO text" in block["mode"]
 
@@ -250,26 +371,46 @@ def test_motion_route_topic_ideas_and_palette_switch(monkeypatch):
         asyncio.run(story_intel.switch_palette(intel, 7, "x"))
 
 
-def test_director_uses_the_users_master_prompt_verbatim_plus_full_3d():
+def test_director_uses_the_users_playbook_master_prompt_verbatim():
     from engines.story_intel import motion
-    master = (motion.Path(motion.__file__).resolve().parent.parent / "prompts" / "motion_graphics_3d_master.md").read_text()
+    master = motion.MASTER_FILE.read_text()
+    assert "MOTION GRAPHIC VIDEO CREATION ENGINE" in master and "Mixed-Media Kinetic Editorial Collage" in master
     msgs = motion.messages("how compound interest works", {"category": "educational", "duration_s": 30}, None, "none",
                            "- Storyboard & Video: ...", "9:16")
     system = msgs[0]["content"]
-    assert system.startswith(master)  # the master prompt, word for word, first
-    for must in ("4.5 3D typography", "THE GOLDEN RULE", "STAGE 6", "FULL 3D", "Section 4 is used in EVERY scene",
-                 "EDITABLE text layer", "no text, no letters, no logos", "- Storyboard & Video: ...",
-                 "Target 30 seconds"):
+    assert system.startswith(master)  # the playbook, word for word, first
+    for must in ("STAGE 5 — VIDEO MOTION GRAPHIC PROMPTS", "Exact duration: 6 seconds per scene", "VOICE-OVER ON",
+                 "NO BACKGROUND MUSIC", "EDITABLE TEXT LAYER", "no text, no letters, no logos", "Nano Banana Pro",
+                 "- Storyboard & Video: ...", "Target 30 seconds"):
         assert must in system
     assert "{APPS}" not in system and "{LENGTH}" not in system and "{PALETTE_RULE}" not in system
-    assert "{STYLES}" not in system and "DIFFERENT FOR EVERY VIDEO" in system and "REALISTIC LOOK" in system
+    assert "FULL 3D" not in system and "REALISTIC LOOK" not in system  # the old 3D master prompt is gone
+
+
+def test_any_motion_graphics_request_goes_to_the_director():
+    from engines.story_intel import motion
+    for p in ("make a motion graphics video about habits", "motion-graphic explainer on inflation",
+              "kinetic typography reel: stop scrolling", "a motion design piece about focus"):
+        assert motion.asks_for_motion(p), p
+    assert not motion.asks_for_motion("a boy discovers a door in his bedroom")
+
+
+def test_the_director_writes_on_opus_and_falls_back(monkeypatch):
+    seen = []
+
+    async def fake(model, messages, **kw):
+        seen.append(model)
+        if model == story_intel.config.MOTION_MODEL:
+            raise story_intel.llm.LLMError("model_not_found")
+        return {"title": "t"}
+    monkeypatch.setattr(story_intel.llm, "chat_json", fake)
+    monkeypatch.setattr(story_intel.config, "MOTION_MODEL", "anthropic/claude-opus-5.5")
+    out = asyncio.run(story_intel._director_json([{"role": "user", "content": "x"}], "story.motion_director", 100))
+    assert out == {"title": "t"} and seen == ["anthropic/claude-opus-5.5", story_intel.config.REASONING_MODEL]
 
 
 def test_each_video_gets_its_own_art_direction_and_palettes():
     from engines.story_intel import motion
-    # Different runs are offered different style families, so the looks do not repeat.
-    offered = {tuple(motion.style_options()) for _ in range(20)}
-    assert len(offered) > 10 and all(len(x) == 4 for x in offered)
     raw = {"title": "Coffee", "script": "Your brain spends money before you do.",
            "art_direction": {"name": "Roastery tabletop", "concept": "coffee's real world", "set": "burlap and wood",
                              "materials": "real beans, enamel mugs", "typography": "stencil slab in matte paint"},

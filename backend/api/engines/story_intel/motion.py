@@ -1,24 +1,24 @@
-"""3D Motion Graphics Director: the user's "Universal 3D Motion Graphics & Mixed-Media Production" master prompt
-(prompts/motion_graphics_3d_master.md, verbatim) plus this app's runtime section, as one agent of Story Intelligence.
-Full 3D: Section 4 of the master prompt in every scene; the words are an editable 3D / flat text layer on top. Chosen for education, finance, business, marketing, psychology, science and
-technology concepts, study / learning topics and commercial explainers (and whenever the user asks for 3D motion
-graphics) - stories with characters, documentaries of real footage, presenters and cooking keep their own agents.
+"""Motion Graphics Director: the user's "Aiplaybook - Viral Motion Explainer Video" master prompt
+(prompts/motion_explainer_master.md, verbatim) plus this app's runtime section, as one agent of Story Intelligence.
+Mixed-media kinetic editorial collage (realistic 3D objects, halftone cutouts, 2.5D floating grids, kinetic
+typography), 9:16, 6-second scenes. Chosen for anything motion-graphics related: psychology, motivation, IT and
+finance, education, marketing, behavioural design, science / technology concepts and commercial explainers (and
+whenever the user asks for motion graphics) - stories with characters, documentaries, presenters and cooking keep
+their own agents.
 
 The master prompt's stages map onto this app:
     Stage 1  topic ideas            only when the input has no real topic (the chat offers 5 titles to pick)
-    Stage 2  script + visual beats  HOOK -> REFRAME -> CORE MECHANISM -> INSIGHT -> CLOSING TRUTH, <= 14 words a line
-    Stage 3  palette lock           3 palette directions; the director picks the best fit, the user can switch
-    Stage 4  keyframe prompts       one art-directed full-3D keyframe per beat, with no text in it
-    Stage 5  motion prompts         the 6-second timeline adapted to each scene's clip length + SFX + transitions
-    Stage 6  capability analysis    the live app registry (engines/video_intelligence.apps_summary)
-    Stage 7-8 generation + QC       the film engine: keyframe -> AI clip -> frame / clip AI checks (incl. the
-                                    spelling of the 3D words) -> joined film -> narration, music, effects
+    Stage 2  narration script       Hook -> Reframe -> Core Mechanism -> Insight -> Echoing Closing Line, <= 14 words
+    Stage 3  palette lock           the playbook's 3 background options; the director picks one, the user can switch
+    Stage 4  keyframe posters       one Nano Banana keyframe per sentence, with no text in it
+    Stage 5  motion prompts         the 6-second timeline per scene + SFX
+    after    generation             the film engine: keyframe -> AI clip -> frame / clip AI checks -> joined film ->
+                                    narration voice-over (TTS) -> the words as an editable text layer
 Each STOP of the master prompt is the app's approval step: the user reviews, switches the palette, edits or
 regenerates a scene, then approves the render.
 """
 
 import json
-import random
 import re
 from pathlib import Path
 
@@ -40,141 +40,90 @@ PALETTES = {
                 "cutouts; warm dimensional lighting"},
 }
 
-# Realistic art-direction families. Each run offers a random handful so the look changes from video to video; the
-# director picks the one that suits the topic (or invents a fresh one), then derives the palettes from the topic.
-ART_DIRECTIONS = [
-    "editorial science still life: the real object on a seamless paper sweep, soft window light, print-magazine layout",
-    "museum specimen display: the subject on a plinth in a gallery set, gallery spotlights, engraved-label typography",
-    "tabletop miniature world: real handmade props at small scale, macro lens, tilt-shift depth, warm practical lights",
-    "paper craft and cut-card dioramas: layered real card stock, visible paper fibre, folded and stacked forms",
-    "architectural maquette: white card and wood scale models, raking sunlight, long precise shadows",
-    "industrial product launch: the real product on machined stages, studio strip lights, technical callout type",
-    "botanical / natural history: real plants, stones, soil and water, soft daylight, field-guide typography",
-    "kitchen-table documentary: everyday objects on real surfaces (wood, linen, concrete), natural mixed light",
-    "stop-motion clay and felt: tactile hand-made forms with real fingerprints and fibres, cosy practical lights",
-    "brutalist concrete set: raw concrete blocks and steps, hard sun and deep shadow, heavy slab typography",
-    "retro print and risograph: real printed paper textures, halftone posters standing in the set, ink-bleed type",
-    "night-city practicals: real objects lit by street, sign and window light spilling in (no neon materials)",
-    "workshop and blueprint: real tools, pencils, rulers and drafting paper, warm lamp light, hand-lettered notes",
-    "luxury material study: real stone, leather, linen and brushed brass surfaces, low-key controlled light",
-    "sports and motion lab: real equipment, chalk lines and track markings, fast hard light, condensed numerals",
-    "children's picture-book set: real painted wood toys and paper, bright soft light, rounded friendly type",
-]
-
-# The user's master prompt, verbatim (prompts/motion_graphics_3d_master.md), plus this app's runtime section.
-MASTER = (Path(__file__).resolve().parent.parent / "prompts" / "motion_graphics_3d_master.md").read_text(encoding="utf-8")
+# The user's master prompt, verbatim (prompts/motion_explainer_master.md), plus this app's runtime section.
+MASTER_FILE = Path(__file__).resolve().parent.parent / "prompts" / "motion_explainer_master.md"
+MASTER = MASTER_FILE.read_text(encoding="utf-8")
 
 APP_SECTION = """
 
 ---
 ## THIS APP (runtime information: how your stages run here - follow the master prompt above for everything else)
 
-STAGES AND STOPS: here you write Stages 2, 3, 4, 5 and 6 in ONE response (as JSON below). The app then shows each
-stage to the user at its approval step - script and beats, the art direction and palette (with buttons to switch to the other two),
-every keyframe and motion prompt, and the production plan - and nothing is generated until the user approves. That
-approval step is the master prompt's STOP / NEXT. Stage 1 only when the input has no real topic (see the end).
-Stage 7-9 (generation, validation, delivery) is done by the app's film engine after approval.
+STAGES AND STOPS: here you write Stages 2, 3, 4 and 5 in ONE response (as JSON below). The app then shows each stage
+to the user at its approval step - the script, the locked background option (with buttons to switch to the other
+two), every keyframe and motion prompt - and nothing is generated until the user approves. That approval step is
+the master prompt's STOP / "next". Stage 1 only when the input has no real topic (see the end).
 
-FULL 3D (the user's direction for this studio): Section 4 is used in EVERY scene, not only when convenient.
-- 4.2: every scene is a complete 3D environment (infinite studio, floating platforms, architectural or abstract
-  dimensional space) with a defined foreground, middle ground and background - never a flat backdrop.
-- 4.1 + 4.4: the hero is a real 3D object with purposeful 3D motion, and the camera moves in 3D (dolly, orbit, arc,
-  crane, macro push-in, Z-axis) - camera movement never replaces object animation.
-- 4.3: name the materials and the key / fill / rim lights, reflections, ambient occlusion and contact shadows.
-- 4.5 (the user's direction, overrides the master prompt): the TYPOGRAPHY TEXT is NOT drawn by the image or video
-  model. It becomes an EDITABLE text layer the app sets on top of the finished film (the user can retype, move and
-  restyle it as 3D or flat letters). So the keyframe_prompt contains NO letters, words, numbers, logos or signage at
-  all - end it with "no text, no letters, no logos". Leave clean space in the composition where the words will sit
-  (say where in "composition", e.g. "upper third kept clear for the headline"). Give the 1-4 words in
-  "typography_text" and their look (3D extruded or flat, weight, colour) in "typography_style".
-- 4.6: exploded views only with components supported by the brief or the references.
-- Section 5 (mixed media) appears only as 3D objects in the scene (paper-textured planes, extruded vector shapes,
-  halftone panels standing in space, floating grid planes) - not as flat 2D overlays.
-- The Stage 3 palettes become 3D worlds: the background colour is the studio floor / walls / sky of the space, the
-  grid is a floor or wall plane, the accents are real materials (e.g. royal purple matte paint, teal powder-coated
-  metal, terracotta ceramic). Use ONLY the locked palette's colours; never invent extra accents (only real photos and the user's
-  product keep their own colours).
+THE USER'S DIRECTIONS FOR THIS APP (they override the master prompt where they differ):
+- VOICE-OVER ON: each script sentence is spoken by a separate narration voice (text-to-speech) laid over the film.
+  The clips themselves stay free of speech: "No voice over" in Stage 5 means no voice INSIDE the clip.
+- NO BACKGROUND MUSIC: the clips carry SFX only (paper whooshes, UI clicks, soft thuds, air swells).
+- TYPOGRAPHY IS AN EDITABLE TEXT LAYER: the 1-4 words are NOT drawn by the image or video model. The app sets them on
+  top of the finished film (the user can retype, move and restyle them). So the keyframe_prompt contains NO letters,
+  words, numbers, logos or signage - end it with "no text, no letters, no logos". Leave clean space where the words
+  will sit (say where in "composition", e.g. "upper third kept clear for the headline"). Give the words in
+  "typography_text" and their hierarchy (Sans-Serif Bold / Editorial Italic Serif, colour from the locked option) in
+  "typography_style". The ghost text and typography motion go in "typography_motion" for the text layer.
+- Platform and AI tool icons (Instagram, TikTok, YouTube, ChatGPT...) are drawn as generic rounded app-icon shapes in
+  their brand colour, without letters or logos.
 
-ART DIRECTION - DIFFERENT FOR EVERY VIDEO (the user's direction): there is no house style. Design a look for THIS
-topic, as a creative director would, so that two videos on different topics never look alike - and two videos on
-the same topic still get their own take. Start from the subject's real world (its real colours, materials, places,
-tools and culture), pick the best fitting option from STYLE OPTIONS FOR THIS VIDEO below (or blend two, or invent a
-better one), and describe it in "art_direction". Then write THREE palettes for this topic (Stage 3): three
-genuinely different colour directions drawn from the subject (not generic presets), each with 3-5 HEX colours
-(background first, then accents, then type). Every scene keeps the chosen art direction and the locked palette -
-the variety is between videos, never inside one film.
-STYLE OPTIONS FOR THIS VIDEO: {STYLES}
+ONE SCENE PER SENTENCE (Stage 4): every script sentence becomes one scene - its keyframe poster (Stage 4) and its
+6-second motion prompt (Stage 5). duration_s is 6 unless the sentence needs longer to be said (then 7-8).
 
-REALISTIC LOOK (the user's direction; it overrides the material and typography lists in 4.3 and 4.5, whatever the
-art direction):
-- Every keyframe reads as a real photograph of a real, physical set - not a stylised CGI toy. The hero looks like
-  the REAL thing, true to its real material, shape, colour and surface detail (e.g. a brain is anatomically
-  accurate matte organic tissue; a coin is worn real metal; a plant is a living plant; a phone is the real device).
-  Accents may take the palette's colours, but the hero keeps its real substance.
-- NEVER make the hero, the letters or the set out of glass, crystal, clear or tinted acrylic, transparent resin,
-  jelly, liquid metal, polished chrome, mirror finishes, marble, iridescent / holographic / pearlescent films or
-  glowing neon edges - unless the USER INPUT explicitly asks for that material.
-- Light it like a real photo shoot that suits the art direction (soft key and fill, hard sun, practicals, low-key
-  spot...), with natural contact shadows, ambient occlusion and real depth of field. No random reflections,
-  lens-flare sparkles or plastic sheen.
-- Typography (the editable layer) fits the art direction: say in "typography_style" the typeface feel (condensed
-  sans, slab, serif, rounded), 3D extruded or flat, and a colour from the locked palette - never glass, chrome or
-  neon.
-- Mixed-media accents come from the art direction and stay tactile and real (paper, card, print, string, tape,
-  chalk, the subject's own tools).
-- Write it into every keyframe_prompt: "photorealistic, real <material> texture, <the art direction's photography
-  style>".
+KEYFRAMES (Stage 4): the image model is Nano Banana Pro. Each keyframe_prompt (100-170 words) is self-contained:
+the exact locked Stage 3 background and grid, 1 distinct primary hero object (3D or mixed-media cutout), at most 2
+supporting vector / collage accents, controlled asymmetry, editorial lighting and drop shadows, the 2 faint diagonal
+background lines in the background-derived colour, 9:16 composition, premium, ultra-detailed, 8K.
 
-MOTION PROMPTS (Stage 5): the clip model (Kling / Seedance) animates each keyframe for 3-10 s. Adapt the six-second
-timeline to the scene's real length. The clip shows NO text at all (the words are the editable layer on top); keep
-the space planned for them clear. SFX only inside the clips: the narration is recorded separately.
+MOTION (Stage 5): the clip model (Kling 3.0 Pro / Seedance) animates each keyframe. Write the four-part timeline
+(0.0-0.5 / 0.5-3.5 / 3.5-4.7 / 4.7-6.0, stretched to the scene's length) for the hero, the vector accents, the
+background lines and the camera. The clip shows NO text at all; keep the space planned for the words clear.
 
-CAPABILITIES (Stage 6) - only what these apps can really do; never invent capabilities:
-{APPS}
-Here every 3D scene is "photorealistic 3D appearance generated directly by a video model" (Stage 6, method 1):
-keyframe image (Nano Banana Pro) -> image-to-video clip (Kling 3.0 Pro / Seedance) -> AI frame and clip checks ->
-joined film -> narration, music, effects -> the words as an editable text layer (3D or flat letters) on top. Say so
-in "production" and name the honest limitations (no editable 3D object; the text is a layer over the film, not an
-object inside the 3D scene).
+PALETTE (Stage 3): return the master prompt's three options as "palettes" (option 1 Signature Editorial, 2 Dark
+Technical/Minimal, 3 High-Contrast Academic), each with 3-5 HEX colours (background first, then accents, then type).
+{PALETTE_RULE} Use ONLY the locked option's colours in every scene.
 
-LENGTH: {LENGTH}. PALETTE: {PALETTE_RULE}
+LENGTH: {LENGTH}. FORMAT: 9:16 unless FORMAT below says otherwise.
 
 FACTS: state only what the RESEARCH given supports (cite it in fact_notes); no fake statistics.
+
+CAPABILITIES - only what these apps can really do:
+{APPS}
 
 Return ONLY JSON:
 {"needs_topic": false, "topic_ideas": [],
  "title": "...", "category": "...", "objective": "...", "audience": "...", "approach": ["..."],
  "script": "the complete narration", "beats": [{"id": "B01", "line": "exact sentence", "role": "hook | reframe |
-  mechanism | insight | closing"}],
- "art_direction": {"name": "a short name for this video's look", "concept": "why this look suits the topic",
-  "set": "the physical world the scenes live in", "materials": "real materials of hero, set and letters",
-  "typography": "typeface style, weight, material and placement", "lighting": "the photography lighting",
-  "camera": "lens and camera language", "texture": "grain, print, surface character"},
- "palettes": [{"option": 1, "name": "...", "spec": "background, accents, type and materials in words",
-  "hex": ["#bg", "#accent", "#type"]}, {"option": 2, ...}, {"option": 3, ...}],
+  mechanism | example | insight | closing"}],
+ "art_direction": {"name": "Mixed-Media Kinetic Editorial Collage", "concept": "how the style serves this topic",
+  "set": "background, grid and framing accents", "materials": "hero objects and cutout treatments",
+  "typography": "Sans-Serif Bold / Editorial Italic Serif hierarchy", "lighting": "editorial lighting and drop
+  shadows", "camera": "locked-off with subtle push / pull or Z drift", "texture": "paper grain, halftone"},
+ "palettes": [{"option": 1, "name": "Signature Editorial", "spec": "...", "hex": ["#bg", "#accent", "#type"]},
+  {"option": 2, "name": "Dark Technical/Minimal", ...}, {"option": 3, "name": "High-Contrast Academic", ...}],
  "palette": {"option": 1 | 2 | 3, "name": "...", "why": "why it fits this topic"},
- "scenes": [{"n": 1, "beat": "B01", "script_line": "exact sentence", "duration_s": 3-10 (about the time to say the
-  line plus a beat to read the type), "visual_concept": "what the viewer sees", "hero_subject": "main subject and
-  visual metaphor", "keyframe_prompt": "the complete TEXT-TO-IMAGE PROMPT (100-170 words): the full 3D scene with
-  NO text, letters or logos in it", "typography_text": "1-4 exact words from the line (the editable text layer)",
-  "typography_style": "3D extruded or flat, weight, colour, where it sits in the frame",
-  "three_d_elements": "geometry, materials, depth, lighting", "graphic_elements": "mixed-media accents as 3D
-  objects", "composition": "foreground / middle ground / background and placement", "lighting": "...",
-  "color": "the locked palette for this frame",
-  "motion": {"style": "...", "hero_object_motion": "...", "three_d_animation": "...", "typography_motion": "...",
-   "graphic_motion": "...", "background_motion": "...", "camera": "...", "lighting": "...", "sfx": "timed SFX",
-   "transition_out": "how it connects to the next scene",
-   "timeline": [{"t": "0.0-0.5", "what": "OPEN ..."}, {"t": "...", "what": "KINETIC BUILD ..."},
-                {"t": "...", "what": "MICRO-MOTION AND HOLD ..."}, {"t": "...", "what": "OUTRO ..."}]},
+ "scenes": [{"n": 1, "beat": "B01", "script_line": "exact sentence", "duration_s": 6,
+  "visual_concept": "what the viewer sees", "hero_subject": "the hero object and the idea it stands for",
+  "keyframe_prompt": "the complete TEXT-TO-IMAGE PROMPT with NO text, letters or logos in it",
+  "typography_text": "1-4 exact words from the line (the editable text layer)",
+  "typography_style": "hierarchy, colour, where it sits in the frame",
+  "three_d_elements": "hero object, materials, depth", "graphic_elements": "the max 2 vector / collage accents",
+  "composition": "placement, asymmetry and the clear space for the words", "lighting": "...",
+  "color": "the locked option for this frame",
+  "motion": {"style": "e.g. 2.5D Mixed-Media Floating Grid", "hero_object_motion": "...", "three_d_animation": "...",
+   "typography_motion": "...", "graphic_motion": "...", "background_motion": "exactly 2 soft diagonal lines ...",
+   "camera": "Static / Slow 5% Push-in / Subtle Parallax Drift", "lighting": "...", "sfx": "timed SFX track",
+   "transition_out": "how it hands over to the next scene",
+   "timeline": [{"t": "0.0-0.5", "what": "Clean Grid Base ..."}, {"t": "0.5-3.5", "what": "Kinetic Entrance ..."},
+                {"t": "3.5-4.7", "what": "Micro-Motion and Hold ..."}, {"t": "4.7-6.0", "what": "Outro ..."}]},
   "method": "ai_clip", "end_frame": "the final composition handed to the next scene"}],
  "connection": "S01 -> S02 -> ...",
- "production": {"application": "...", "model": "...", "method": "...", "resolution": "...", "aspect_ratio": "...",
-  "audio": "...", "limitations": ["honest compromises"]},
+ "production": {"application": "...", "model": "...", "method": "...", "resolution": "...", "aspect_ratio": "9:16",
+  "audio": "narration voice-over + clip SFX, no music", "limitations": ["honest compromises"]},
  "fact_notes": [{"claim": "...", "source": "..."}]}
 STAGE 1 here: when the input has NO real topic (e.g. "make me a video", "finance video ideas", "something about
-psychology"), return {"needs_topic": true, "topic_ideas": ["VIDEO TITLE 01", ..., "VIDEO TITLE 05"]} and leave the
-rest empty. The five must be DIFFERENT angles across the domain (e.g. for finance: a spending habit, an investing
-idea, a history story, a money myth, a behavioural trap) - never five variations of one subject."""
+psychology"), return {"needs_topic": true, "topic_ideas": ["VIDEO TITLE 01", ..., "VIDEO TITLE 05"]} using the
+PROVEN VIRAL TOPIC ANGLES, and leave the rest empty. The five must be DIFFERENT angles across the niche."""
 
 DIRECTOR = MASTER + APP_SECTION
 
@@ -188,18 +137,11 @@ def palette_rule(option: int | None, palettes: dict | None = None) -> str:
             "the render).")
 
 
-def style_options(k: int = 4, rng: random.Random | None = None) -> list[str]:
-    """A random handful of art directions for this run, so each video starts from a different place."""
-    return (rng or random).sample(ART_DIRECTIONS, k)
-
-
 def messages(prompt: str, cls: dict, res: dict | None, files_note: str, apps: str, aspect_ratio,
              palette: int | None = None, keep_script: str | None = None, keep_style: dict | None = None) -> list[dict]:
-    length = (f"Target {cls['duration_s']} seconds" if cls.get("duration_s") else "Target 15-60 seconds")
+    length = (f"Target {cls['duration_s']} seconds" if cls.get("duration_s") else "Target 15-30 seconds")
     pals = (keep_style or {}).get("palettes")
-    styles = "\n".join(f"- {x}" for x in style_options())
     system = MASTER + (APP_SECTION.replace("{LENGTH}", length).replace("{PALETTE_RULE}", palette_rule(palette, pals))
-                       .replace("{STYLES}", "\n" + styles)
                        .replace("{APPS}", apps or "(registry unavailable)"))
     user = [f"USER INPUT:\n{prompt.strip()}", f"FORMAT: {aspect_ratio or '9:16'}", f"FILES: {files_note}",
             f"UNDERSTANDING: {json.dumps({k: cls.get(k) for k in ('category', 'intent', 'subject', 'audience', 'tone', 'language')}, ensure_ascii=False)}"]
@@ -212,6 +154,15 @@ def messages(prompt: str, cls: dict, res: dict | None, files_note: str, apps: st
         user.append("KEEP THIS ART DIRECTION AND THESE THREE PALETTES exactly (return them unchanged); only the locked "
                     "palette changes:\n" + json.dumps(keep_style, ensure_ascii=False))
     return [{"role": "system", "content": system}, {"role": "user", "content": "\n\n".join(user)}]
+
+
+# A request that names motion graphics goes to this director in any mode (the user's direction).
+MOTION_ASK = re.compile(r"\b(motion[- ]?graphics?|motion[- ]design(ed)?|motion explainer|kinetic typography|mograph|"
+                        r"animated explainer|motion[- ]?gfx)\b", re.I)
+
+
+def asks_for_motion(prompt: str) -> bool:
+    return bool(MOTION_ASK.search(prompt or ""))
 
 
 HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -291,14 +242,14 @@ def to_plan(d: dict) -> dict:
                                                                              for s in d.get("scenes") or [])[:1500]}],
                       "world": {"palette": look, "background": "locked palette background, grid and accents",
                                 "lighting": "premium directional key, soft fill, rim light, contact shadows"}},
-            "style": {"visual_style": "Full 3D motion graphics (the user's master prompt, Section 4 in every scene)"
+            "style": {"visual_style": "Mixed-media kinetic editorial collage motion graphics (the user's playbook)"
                                       + (f" - {art['name']}" if art.get("name") else "")
                                       + (" - " + ", ".join(d.get("approach") or []) if d.get("approach") else ""),
                       "look": look, "palette_option": opt,
                       "effects_plan": [{"scene": n, "effect": (sc.get("motion") or {}).get("typography_motion") or "",
                                         "why": f"typography: {sc.get('typography_text') or ''}"}
                                        for n, sc in enumerate(d.get("scenes") or [], start=1) if isinstance(sc, dict)]},
-            "audio_plan": {"music": "none inside the clips (SFX only); a light bed may be mixed under the narration",
+            "audio_plan": {"music": "none (the playbook: no background music; SFX only inside the clips)",
                            "voice": "separate narration, one line per scene",
                            "sync_points": [f"scene {n}: {(sc.get('motion') or {}).get('sfx')}" for n, sc in
                                            enumerate(d.get("scenes") or [], start=1)
@@ -315,30 +266,11 @@ def to_plan(d: dict) -> dict:
                                 "category": d.get("category"), "audience": d.get("audience")}}
 
 
-# Stylised materials the user does not want unless they ask for them (the REALISTIC LOOK rule above).
-STYLIZED = re.compile(r"\b(glass(y)?|crystal(line)?|acrylic|resin|translucent|transparent|see-through|jelly|"
-                      r"liquid[- ]metal|chrome|chromed|mirror(ed)?|marble|iridescen\w*|holograph\w*|pearlescen\w*|"
-                      r"neon)\b", re.I)
-
-
-def wants_stylized(prompt: str) -> bool:
-    """The user asked for glass / chrome / marble etc. themselves, so the realism rule steps aside."""
-    return bool(STYLIZED.search(prompt or ""))
-
-
-def lint(plan: dict, stylized_ok: bool = False) -> list[dict]:
+def lint(plan: dict) -> list[dict]:
     """Stage-2 / Stage-4 rules the director must keep (on top of the shared scene rules)."""
     out = []
     for s in plan.get("scenes") or []:
         mg = s.get("motion_gfx") or {}
-        if not stylized_ok:
-            look = " ".join(str(mg.get(k) or "") for k in ("keyframe_prompt", "typography_style", "three_d_elements"))
-            bad = sorted({m.group(0).lower() for m in STYLIZED.finditer(look)})
-            if bad:
-                out.append({"scene": s["n"], "area": "prompts",
-                            "problem": f"stylised materials ({', '.join(bad)}) instead of a realistic look",
-                            "fix": "real-world materials true to the subject, matte letters, natural studio "
-                                   "photography (REALISTIC LOOK)"})
         line = str(mg.get("script_line") or "")
         if len(line.split()) > 14:
             out.append({"scene": s["n"], "area": "scenes", "problem": f"the line has {len(line.split())} words",

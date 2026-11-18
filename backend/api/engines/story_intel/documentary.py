@@ -69,6 +69,18 @@ ARCHIVE_FIELD = """ "archive": ["A1"] - the ARCHIVE PHOTOS this scene pins as pr
 """
 
 
+# Words that ask for the host + board method instead of the VOX Documentary: someone on camera, or real archive photos.
+HOSTED = re.compile(r"\b((with|by|and|has|have|use|using|needs?) (a|an|the|one|our) (\w+ )?(host|presenter|anchor)|"
+                    r"hosted by|presented by|presenters?|on[- ]camera|talking head|someone (presenting|explaining)|"
+                    r"a person (presenting|explaining)|(real|archive|archival|historical) (photos?|photographs?|"
+                    r"pictures?|images?|footage))\b", re.I)
+
+
+def wants_host(prompt: str) -> bool:
+    """The request asks for a person on camera or real archive photos: the cinematic host + board method makes it."""
+    return bool(HOSTED.search(prompt or ""))
+
+
 def applies(cls: dict) -> bool:
     """Documentaries always; a factual presentation in another category when it is not made as 3D motion graphics."""
     if cls.get("production") == "motion_graphics" or cls.get("agent") in ("motion", "food", "presenter"):

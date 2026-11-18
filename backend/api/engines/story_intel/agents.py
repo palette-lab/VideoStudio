@@ -14,6 +14,8 @@ CATEGORIES = {
     "documentary": "real events, history, biography, real places, true crime, discoveries",
     "product": "a product launch, commercial, product explainer or ad (with or without a person)",
     "presenter": "a person talking to camera: UGC, review, testimonial, tutorial host",
+    "short_drama": "a short drama / micro-drama / web-series episode where characters talk to each other (romance, "
+                   "revenge, family, office, CEO, thriller), or a novel, chapter or story text adapted into episodes",
     "other": "anything else (music or mood film, travel, event, motivational): use the general arc",
 }
 
@@ -43,6 +45,10 @@ SHAPES = {
                "demonstration) -> close: availability or the line people repeat. No invented specs.",
     "presenter": "Scroll-stopping first line -> who they are / the problem -> 2-4 clear points, each with what "
                  "they hold or show -> the real demonstration -> the result -> call to action.",
+    "short_drama": "Hook line or confrontation in the first 3 s -> who wants what and who stands in the way -> "
+                   "the pressure rises line by line (humiliation, a secret, a threat) -> the reversal (status flips, "
+                   "the truth comes out) -> the strongest line of the episode -> the cliffhanger (a reveal, an "
+                   "arrival, a question) that the next episode opens on.",
     "other": "Hook -> set-up -> development with a turn -> payoff -> closing image.",
 }
 
@@ -57,7 +63,9 @@ Return ONLY JSON:
  "intent": "what the user actually wants, one sentence", "subject": "...", "central_idea": "...",
  "audience": "...", "story_type": "e.g. animal fable, locked-room mystery, science explainer",
  "tone": "...", "visual_style": "the look that fits THIS input (e.g. stylised 3D animated forest for a children's
- fable, archival + maps + timelines for history, premium macro studio for a product)",
+ fable, archival + maps + timelines for history, premium macro studio for a product, photoreal vertical drama
+ with faces big in frame for a short drama)",
+ "episodes": the number of episodes the user asks for (1 when they do not ask for a series),
  "is_factual": true when the film states real-world facts (history, science, real people, products),
  "research": "none | light | deep" (fiction and fables: none; well-known facts: light; history, science,
  real events: deep), "research_queries": ["up to 4 short encyclopedia searches for the facts this film needs"],
@@ -66,13 +74,14 @@ Return ONLY JSON:
   paintings, maps and documents the film could pin; [] for fiction"],
  "language": "en | ko | ... (the language of the request)",
  "duration_s": the film's length in seconds (the user's number if given, otherwise what this story needs: a fable
- 45-75, a puzzle 45-90, an explainer 45-90, a documentary 60-90, an ad 20-30),
- "production": "motion_graphics | cinematic" - motion_graphics (the 3D Motion Graphics Director: premium 3D /
- 2.5D / kinetic-typography / infographic motion design) for education and study / learning topics, finance, money,
+ 45-75, a puzzle 45-90, an explainer 45-90, a documentary 60-90, an ad 20-30, a short-drama episode 45-90),
+ "production": "motion_graphics | cinematic" - motion_graphics (the Motion Graphics Director: mixed-media kinetic
+ editorial explainers - realistic 3D objects, halftone cutouts, 2.5D grids, kinetic typography) for human psychology,
+ motivation, IT, education and study / learning topics, finance, money,
  business, marketing, economics, psychology and human behaviour, productivity, science and technology concepts,
  how-something-works explainers, data, and commercial / product explainers or launches (exploded views, materials,
  features) - and whenever the user asks for 3D or motion graphics; cinematic (live-action-look AI film) for stories
- with characters (fables, fiction), puzzles and mysteries, documentaries of real events and places, presenters
+ with characters (fables, fiction, short dramas), puzzles and mysteries, documentaries of real events and places, presenters
  talking to camera, cooking, travel, music and mood films,
  "has_topic": false only when the input has no real topic to make a video about (e.g. "make me a video", "finance
  video ideas", "something about psychology") - otherwise true,

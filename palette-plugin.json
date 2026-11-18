@@ -97,6 +97,16 @@
       "required": true,
       "help": "fal.ai key the Flow Video and Storyboard & Video engines use for images and clips."
     },
+    "LLM_ROUTER_API_KEY": {
+      "scope": "plugin",
+      "required": false,
+      "help": "LLM Router developer key (gw_...). The VOX Documentary paints its images through the router's native media API (Nano Banana Pro / Gemini), billed to the router instead of FAL_KEY."
+    },
+    "LLM_ROUTER_BASE_URL": {
+      "scope": "plugin",
+      "required": false,
+      "help": "LLM Router address (default https://router-api.pltt.ai; any path after the host is ignored)."
+    },
     "PALETTE_VIDEO_QUALITY": {
       "scope": "plugin",
       "required": false,

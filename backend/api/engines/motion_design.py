@@ -71,6 +71,9 @@ def finish_level(genre: str | None, prompt: str = "", production_types=(), perso
 
 
 def finish_summary(level: str) -> str:
+    if level == "drama":  # a short drama: the faces and the lines are the show
+        return ("Drama finish: the dialogue as subtitles in an editable text layer; no effects, callouts or titles "
+                "over the picture.")
     if level == "documentary":  # the cinematic-skill method: type it OR show it, one hero per line, nothing extra
         return ("Documentary finish: the film's own typed words (dates, names, places, stamps, numbers) timed to each "
                 "scene, plus captions, as an editable text layer; no punch-ins, pop words or callouts over the picture.")

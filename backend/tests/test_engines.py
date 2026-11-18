@@ -27,6 +27,8 @@ def test_engine_plans_makes_stills_clips_and_joins(app_id, tmp_path, monkeypatch
         _clip(clips[f"https://fal.media/clip{i}.mp4"], c)
 
     async def fake_chat(model, messages, **kw):
+        if kw.get("stage") == "engine.story.locations":  # no places planned: the look frame anchors the scenes
+            return {}
         if kw.get("stage") == "engine.critic":
             return {"score": 90, "issues": []}
         if kw.get("stage") == "engine.story.consistency":
@@ -57,8 +59,11 @@ def test_engine_plans_makes_stills_clips_and_joins(app_id, tmp_path, monkeypatch
             seen["passport"] = True
             return {"images": [{"url": "https://fal.media/passport.png"}]}
         if prompt.startswith(("FULL-BODY FRONT VIEW of girl", "FULL-BODY BACK VIEW of girl")):  # from the portrait
-            assert kw["image_urls"] == ["https://fal.media/passport.png"] and kw["aspect_ratio"] == "9:16"
             side = "front" if "FRONT" in prompt[:20] else "back"
+            # the back is drawn after the front and from it, so both show the same outfit
+            want = ["https://fal.media/passport.png"] + (["https://fal.media/front.png"] if side == "back" else [])
+            assert kw["image_urls"] == want and kw["aspect_ratio"] == "9:16"
+            assert side == "front" or seen.get("front")
             seen[side] = True
             return {"images": [{"url": f"https://fal.media/{side}.png"}]}
         if prompt.startswith("LOOK FRAME"):  # the film's world, drawn once beside the characters
@@ -119,7 +124,8 @@ def test_engine_plans_makes_stills_clips_and_joins(app_id, tmp_path, monkeypatch
                                                "fixed": ["an extra plate on the table -> remove it"]}
     assert out["scenes"][0]["image_prompt"] and out["scenes"][0]["motion_prompt"]
     assert seen["clip_qa"] == 2 and out["scenes"][1]["qa"]["clip"] == {"issues": [], "retaken": False}
-    assert out["plan"]["cast_sheet_url"] == "https://fal.media/passport.png" and seen["checks"] == 2
+    # the character check runs on both first frames and on the last frame the clip lands on
+    assert out["plan"]["cast_sheet_url"] == "https://fal.media/passport.png" and seen["checks"] == 3
     assert out["plan"]["cast"][0]["back"] == "https://fal.media/back.png"
     assert out["plan"]["total"] == 10 and out["plan"]["requested_total"] == 40  # test quality caps the length
     assert 9.5 < out["duration_s"] < 10.5
@@ -328,7 +334,8 @@ def test_each_character_gets_passport_front_and_back_and_only_its_scenes_use_the
     cast = [{"name": "Mina", "urls": ["m1", "m2", "m3"], "views": ["passport portrait", "full-body front", "full-body back"]},
             {"name": "Leo", "urls": ["l1"], "views": ["passport portrait"]}]
     assert story_engine.scene_cast({"image_prompt": "Leo jumps in a puddle"}, cast) == [cast[1]]
-    assert story_engine.scene_cast({"image_prompt": "a woman pours tea"}, cast) == cast  # unnamed person: everyone
+    assert story_engine.scene_cast({"image_prompt": "a woman pours tea"}, cast) == cast[:1]  # unnamed: the lead only
+    assert story_engine.scene_cast({"image_prompt": "a couple pours tea"}, cast) == cast  # a group: everyone
     assert story_engine.scene_cast({"image_prompt": "macro of a steaming mug"}, cast) == []  # no person: no refs
     note = story_engine._cast_note(cast)
     assert "reference images 1-3 are Mina" in note and "reference image 4 is Leo" in note and "blank" in note
@@ -454,3 +461,79 @@ def test_documentary_host_is_cut_in_on_camera_or_narrated_when_lipsync_fails(hos
         assert seen["narrated"] == [("The ship left port.", "male")]  # the narrator IS the host's voice
     else:  # no lip-sync: the host's line is narrated over a board scene and the film still finishes
         assert seen["videos"] == 2 and ("One night in April, a ship sank.", "male") in seen["narrated"]
+
+
+def test_places_are_drawn_first_and_every_scene_is_drawn_inside_its_place(tmp_path, monkeypatch):
+    """The boy-and-the-door fix: an empty plate per place before the scenes (no look frame then); each scene's still
+    gets its place's plate after its characters, a LOCKED LOOK in words, and a drifted still is EDITED, not redrawn."""
+    monkeypatch.setenv("FAL_KEY", "test-key")
+    monkeypatch.setenv("PALETTE_VIDEO_QUALITY", "test")
+    _clip(tmp_path / "src.mp4", "red")
+    seen = {"images": [], "checks": 0}
+
+    async def fake_chat(model, messages, **kw):
+        st = kw.get("stage")
+        if st == "engine.story.locations":
+            return {"locations": [{"id": "L1", "name": "attic bedroom", "plate": "slanted blue walls, brass bed"},
+                                  {"id": "L2", "name": "forest", "plate": "moss and tall trees"}],
+                    "scenes": ["L1", "L2"]}
+        if st == "engine.story.consistency":
+            seen["checks"] += 1
+            imgs = [p["image_url"]["url"] for p in messages[0]["content"][1:]]
+            assert imgs[-2] in ("https://fal.media/plate_L1.png", "https://fal.media/plate_L2.png")  # the place too
+            if seen["checks"] == 1:  # the first still has the wrong pyjamas
+                return {"same": False, "differences": ["plain navy pyjamas instead of striped"]}
+            return {"same": True, "differences": []}
+        if st in ("engine.critic",):
+            return {"score": 90, "issues": []}
+        if st in ("engine.scene_qa", "engine.clip_qa"):
+            return {"ok": True, "issues": []}
+        if st == "engine.graphics_director":
+            return {"add_graphics": False, "why": "story"}
+        return {"title": "Door", "story": "A boy finds a door.",
+                "bible": {"characters": [{"name": "Eliot", "clothing": "navy-and-white striped pyjamas"}]},
+                "scenes": [{"title": "Eliot wakes", "duration": 5, "image_prompt": "Eliot in navy pyjamas sits up in bed",
+                            "camera": "static"},
+                           {"title": "Eliot in the forest", "duration": 5, "image_prompt": "Eliot steps onto moss",
+                            "camera": "static"}]}
+
+    def fake_image(key, model, prompt, **kw):
+        seen["images"].append((prompt, kw.get("image_urls") or []))
+        if prompt.startswith("PASSPORT-STYLE"):
+            return {"images": [{"url": "https://fal.media/passport.png"}]}
+        if prompt.startswith("FULL-BODY"):
+            return {"images": [{"url": f"https://fal.media/{'front' if 'FRONT' in prompt[:20] else 'back'}.png"}]}
+        if prompt.startswith("LOOK FRAME"):
+            raise AssertionError("with places planned the look frame is not drawn")
+        if prompt.startswith("LOCATION PLATE"):
+            return {"images": [{"url": f"https://fal.media/plate_{'L1' if 'slanted' in prompt else 'L2'}.png"}]}
+        return {"images": [{"url": f"https://fal.media/still{len(seen['images'])}.png"}]}
+
+    async def fake_download(url, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(tmp_path / "src.mp4", dest)
+        return str(dest)
+
+    monkeypatch.setattr(story_engine.llm, "chat_json", fake_chat)
+    monkeypatch.setattr(story_engine.fal_helper, "generate_image", fake_image)
+    monkeypatch.setattr(story_engine.fal_helper, "generate_video", lambda *a, **k: {"video": {"url": "https://x/c.mp4"}})
+    monkeypatch.setattr(story_engine, "_download", fake_download)
+    monkeypatch.setattr(story_engine.music, "available", lambda: "off in tests")
+
+    async def progress(m):
+        seen.setdefault("msgs", []).append(m)
+
+    out = asyncio.run(story_engine.run({"app_id": "pltt-storyboard-video-maker", "name": "App"},
+                                       {"prompt": "a boy finds a door", "request": {"duration": 10, "aspect_ratio": "9:16"}},
+                                       {}, tmp_path / "work", progress))
+    plates = [p for p, _ in seen["images"] if p.startswith("LOCATION PLATE")]
+    assert len(plates) == 2 and any("drawing 2 locations before the scenes" in m for m in seen["msgs"])
+    scene_prompts = [(p, u) for p, u in seen["images"] if p.startswith("Eliot")]
+    bed, forest = scene_prompts[0], scene_prompts[1]
+    assert bed[1][:3] == ["https://fal.media/passport.png", "https://fal.media/front.png", "https://fal.media/back.png"]
+    assert bed[1][3] == "https://fal.media/plate_L1.png" and forest[1][3] == "https://fal.media/plate_L2.png"
+    assert "LOCATION PLATE (attic bedroom)" in bed[0] and "LOCKED LOOK" in bed[0] and "striped pyjamas" in bed[0]
+    edits = [(p, u) for p, u in seen["images"] if p.startswith("EDIT reference image 1")]
+    assert len(edits) == 1 and "plain navy pyjamas instead of striped" in edits[0][0]
+    assert edits[0][1][0].startswith("https://fal.media/still") and "https://fal.media/plate_L" in edits[0][1][-1]
+    assert [l["name"] for l in out["plan"]["locations"]] == ["attic bedroom", "forest"]

@@ -36,7 +36,8 @@ THEMES = ("studio", "clean", "paper", "chalk", "blueprint", "midnight", "editori
 SIZES = ("16:9", "9:16", "1:1", "4:5")
 LANGUAGES = ("en", "es", "fr", "it", "pt-br", "hi", "ja", "zh")  # Kokoro's (German needs a paid voice)
 DOC_CHARS = 60000
-FIX_ROUNDS = 2
+FIX_ROUNDS = 3
+EXAMPLE = "how-dns-works"  # one of explainroo's own finished projects, shown to the scene writer as a pattern
 TIMEOUT_S = 1800
 DOC_TOPICS = ("writing", "pictures", "scene-api", "troubleshooting")
 
@@ -100,6 +101,74 @@ async def docs(topic: str, cwd: Path) -> str:
     return _DOCS[topic]
 
 
+_PKG: dict[str, Path | None] = {}
+
+
+async def package_dir(cwd: Path) -> Path | None:
+    """Where the explainroo package that renders is installed (from `explainroo doctor`), for its icons and examples."""
+    if "dir" not in _PKG:
+        try:
+            rep = await run_cli(["doctor"], cwd, 300)
+            found = next((c.get("detail") for c in rep.get("checks") or [] if c.get("name") == "runs from"), None)
+            _PKG["dir"] = Path(found) if found and Path(found).is_dir() else None
+        except ExplainerError as e:
+            log.warning("explainroo doctor failed: %s", e)
+            _PKG["dir"] = None
+    return _PKG["dir"]
+
+
+def icon_set(pkg: Path | None) -> tuple[set[str], dict[str, list[str]]]:
+    """explainroo's icon names (Lucide, with its aliases) and each icon's search tags; empty when unknown."""
+    if not pkg:
+        return set(), {}
+    try:
+        lucide = json.loads((pkg / "engine" / "icons" / "lucide.json").read_text(encoding="utf-8"))
+        tags = json.loads((pkg / "engine" / "icons" / "lucide-tags.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log.warning("explainroo icon list unreadable: %s", e)
+        return set(), {}
+    return set(lucide.get("icons") or {}) | set(lucide.get("aliases") or {}), tags if isinstance(tags, dict) else {}
+
+
+BRANDS = {"github": "git-branch", "gitlab": "git-merge", "bitbucket": "git-pull-request", "linkedin": "briefcase",
+          "twitter": "message-circle", "x": "message-circle", "facebook": "users", "instagram": "camera",
+          "youtube": "circle-play", "slack": "messages-square", "discord": "messages-square", "google": "search",
+          "aws": "cloud", "azure": "cloud", "gcp": "cloud", "docker": "container", "kubernetes": "boxes",
+          "python": "code", "javascript": "code", "react": "atom", "openai": "brain", "apple": "laptop",
+          "windows": "monitor", "android": "smartphone", "chrome": "globe", "figma": "pen-tool", "notion": "notebook"}
+
+ICON_USE = re.compile(r"""(?:\.icon\(\s*|\bicon\s*:\s*)(['"])([A-Za-z0-9_-]+)\1""")
+
+
+def bad_icons(code: str, names: set[str], tags: dict[str, list[str]]) -> list[str]:
+    """Problems for every icon scenes.js asks for that explainroo does not have (it fails only at render time), with
+    real icons that fit. Brand logos (github, linkedin, ...) are not in Lucide."""
+    if not names:
+        return []
+    out = []
+    for wanted in sorted({m.group(2) for m in ICON_USE.finditer(code or "")} - names):
+        words = set(re.split(r"[-_]", wanted.lower()))
+        near = [BRANDS[w] for w in sorted(words) if BRANDS.get(w) in names]
+        near += sorted(n for n, t in tags.items() if words & set(re.split(r"[-_ ]", n)) or words & {str(x).lower() for x in t})
+        out.append(f'[error] icon "{wanted}" does not exist in explainroo (no brand logos). Use one that exists, '
+                   f"e.g. {', '.join(dict.fromkeys(near[:8])) or 'code, globe, user, briefcase, star'}")
+    return out
+
+
+def example_project(pkg: Path | None) -> str:
+    """A finished explainroo project (script.md + scenes.js) as a working pattern for positions, cues and layout."""
+    if not pkg:
+        return ""
+    d = pkg / "examples" / EXAMPLE
+    try:
+        return (f"EXAMPLE PROJECT (a real, working explainroo video - copy its patterns: x / y positions inside the "
+                f"frame, ids, at: cues, out:, at: -1 to keep earlier parts):\n--- script.md ---\n"
+                f"{(d / 'script.md').read_text(encoding='utf-8')}\n--- scenes.js ---\n"
+                f"{(d / 'scenes.js').read_text(encoding='utf-8')}")
+    except OSError:
+        return ""
+
+
 # ------------------------------------------------------------------------------------------------- the LLM steps
 
 ANALYST = """You are the DocumentAnalyst of a video studio. The user uploaded one or more documents and wants an
@@ -125,9 +194,40 @@ video. Below is explainroo's own guide to writing the script - follow it exactly
 {DOCS}
 
 Write the narration from the ANALYSIS: one scene per outline item (the scene heading is its id), only facts from
-the analysis, every number and name exactly as there. Fit the target length. Speak in the analysis' language.
+the analysis, every number and name exactly as there. Speak in the analysis' language.
+LENGTH: {BUDGET}
 Put [#marker]s before the words where a drawing should appear, so the pictures can land on them.
+Every abbreviation, degree, code, version or symbol the voice could misread gets explainroo's {shown|spoken} pair
+the first time, e.g. {B.Tech|B Tech}, {CGPA|C G P A}, {GenAI|gen A I}, {RAG|rag}, {7.5|seven point five}.
 Return ONLY JSON {"script_md": "the whole script.md"}."""
+
+SHORTEN = """explainroo estimates this script at {SECONDS} s, but the video must be about {TARGET} s.
+It has {NOW} spoken words; it must have {WORDS} ({CHANGE}). Count the words of your new script before you answer.
+Keep every scene heading and [#marker] of the scenes you keep; {ACTION}. Same syntax and rules as before.
+Return ONLY JSON {"script_md": "the whole script.md"}."""
+
+WORDS_PER_S = 3.0  # explainroo's Kokoro pace (180 words a minute, from `voice --estimate`)
+SCENE_S = 1.2  # the pause and hold it adds per scene
+LENGTH_TOLERANCE = 0.15
+LENGTH_ROUNDS = 3
+
+
+def words_for(est: dict, target_s: float) -> int | None:
+    """How many spoken words fit target_s, from explainroo's own estimate of this script: its words and how much of
+    its time is speech (the rest - pauses and scene holds - stays about the same)."""
+    try:
+        words, secs, speech = float(est["words"]), float(est["seconds"]), float(est["speechSeconds"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    fixed = max(0.0, secs - speech)
+    if words <= 0 or speech <= 0:
+        return None
+    return max(20, int(words * max(1.0, target_s - fixed) / speech))
+
+
+def word_budget(target_s: float, scenes: int) -> int:
+    """About how many spoken words fill target_s seconds with this many scenes."""
+    return max(40, int((target_s - scenes * SCENE_S - 1.5) * WORDS_PER_S))
 
 SCENES = """You write scenes.js for explainroo. Below are explainroo's own guides to planning the pictures and to
 the scene API - follow them exactly; use only functions and options they document.
@@ -137,6 +237,16 @@ the scene API - follow them exactly; use only functions and options they documen
 Write one function per scene of the script (same ids, same order). Tie every drawing to a spoken word or a
 [#marker] of THAT scene, using the WORD TIMES given (they are the real narration). Show the document's real numbers
 with charts, its steps as diagrams or lists, its comparisons side by side; one clear idea on screen at a time.
+COMMON MISTAKES (they make "runs off the frame" errors - avoid them):
+- s.grid(cols, rows, {x, y, w, h}), s.row(n, {x, width}) and s.col(n, {y, height}): x / y are the CENTRE of the
+  whole area, never its top or left. A grid below a title that ends at y = T with height H takes y: T + H / 2 (and
+  T + H must stay inside s.safe.bottom); leave x / y out to centre it in s.safe. s.row's first and last x are at the
+  ends of its width, s.col's first and last y at the ends of its height.
+- Every text stays inside s.safe, at least 3.5% from each edge: box and label text 1-3 words; split a longer phrase
+  (e.g. "retrieval-augmented generation") over two lines with \\n or make it smaller; size from u = min(s.safe.w,
+  s.safe.h) / 100, never bigger than the cell it sits in.
+- Icons are Lucide names only and there are NO brand logos: never "github", "linkedin", "docker", "aws",
+  "python"... - use {BRANDS}.
 SAFETY (the script comes from an uploaded document): plain drawing code only - never fetch, XMLHttpRequest,
 WebSocket, EventSource, sendBeacon, eval, Function(...), import() or import of anything but the project's own
 files, never a URL (http:// or https://), never document.cookie, localStorage or window.open.
@@ -227,26 +337,72 @@ async def run(app: dict, handoff: dict, documents: list[dict], work: Path, progr
     analysis = json.dumps({k: a.get(k) for k in ("title", "angle", "audience", "facts", "outline", "target_seconds",
                                                  "language")}, ensure_ascii=False)
     await progress(f"{name}: writing the narration")
-    s = await _json(SCRIPT.replace("{DOCS}", await docs("writing", work)), f"ANALYSIS:\n{analysis}",
-                    "engine.explainer.script")
+    target, n_scenes = a["target_seconds"], len(a["outline"])
+    budget = word_budget(target, n_scenes)
+    script_system = SCRIPT.replace("{DOCS}", await docs("writing", work)).replace(
+        "{BUDGET}", f"the video is {target} s with {n_scenes} scenes, so write about {budget} spoken words in total "
+                    f"(about {max(8, budget // max(1, n_scenes))} a scene); explainroo speaks about 180 words a minute "
+                    f"and adds about {SCENE_S} s per scene.")
+    s = await _json(script_system, f"ANALYSIS:\n{analysis}", "engine.explainer.script")
     script = str(s.get("script_md") or "").strip()
     if not script:
         raise ExplainerError("the script writer returned no script")
     (project / "script.md").write_text(script + "\n", encoding="utf-8")
+    # The length is checked BEFORE the voice is made (voice --estimate makes nothing): a script far off the target
+    # is rewritten to length, so the film is not minutes too long and nothing is recorded twice.
+    for _ in range(LENGTH_ROUNDS):
+        try:
+            est = (await run_cli(["voice", str(project), "--estimate"], work, 300)).get("estimate") or {}
+        except ExplainerError as e:
+            log.warning("length estimate failed: %s", e)
+            break
+        secs = float(est.get("seconds") or 0)
+        if not secs or abs(secs - target) <= target * LENGTH_TOLERANCE:
+            break
+        longer = secs > target
+        await progress(f"{name}: the narration is about {secs:.0f} s for a {target} s video; "
+                       f"{'shortening' if longer else 'lengthening'} it")
+        now = int(float(est.get("words") or 0)) or None
+        want = words_for(est, target) or budget
+        change = (f"cut {now - want} words, about {round(100 * (now - want) / now)}%" if now and longer else
+                  f"add {want - now} words" if now else "")
+        big_cut = bool(now) and longer and (now - want) > 0.3 * now
+        action = ("keep the most important facts exactly and cut the rest: shorter sentences, no side details, no "
+                  "repeated points" + ("; you may drop the least important scene(s) entirely" if big_cut else "")
+                  if longer else "add the next most useful facts from the analysis, exactly as there")
+        r = await _json(script_system, f"ANALYSIS:\n{analysis}\n\nCURRENT script.md:\n{script}\n\n"
+                        + SHORTEN.replace("{SECONDS}", f"{secs:.0f}").replace("{TARGET}", str(target))
+                        .replace("{NOW}", str(now or "?")).replace("{WORDS}", f"at most {want}" if longer else
+                                                                   f"about {want}")
+                        .replace("{CHANGE}", change or "fit the length").replace("{ACTION}", action),
+                        "engine.explainer.length")
+        new = str(r.get("script_md") or "").strip()
+        if not new:
+            break
+        script = new
+        (project / "script.md").write_text(script + "\n", encoding="utf-8")
 
-    await progress(f"{name}: recording the voice and timing every word (first run downloads the voice models)")
+    await progress(f"{name}: recording the voice and timing every word")
     await run_cli(["voice", str(project)], work)
     words = await run_cli(["words", str(project)], work, 300)
 
     await progress(f"{name}: drawing the scenes")
-    guides = "\n\n".join([await docs("pictures", work), await docs("scene-api", work), await docs("troubleshooting", work)])
-    scenes_system = SCENES.replace("{DOCS}", guides)
+    pkg = await package_dir(work)
+    names, tags = icon_set(pkg)
+    guides = "\n\n".join([await docs("pictures", work), await docs("scene-api", work), await docs("troubleshooting", work),
+                           example_project(pkg)])
+    scenes_system = SCENES.replace("{DOCS}", guides).replace(
+        "{BRANDS}", ", ".join(f"{b} for {k}" for k, b in list(BRANDS.items())[:14]))
     scenes_user = (f"ANALYSIS:\n{analysis}\n\nSCRIPT (script.md):\n{script}\n\n"
                    f"WORD TIMES (explainroo words):\n{json.dumps(words, ensure_ascii=False)[:30000]}")
     sj = await _json(scenes_system, scenes_user, "engine.explainer.scenes", 24000)
     code = str(sj.get("scenes_js") or "")
+    from . import story_engine
+    fast = story_engine.quality() is story_engine.QUALITY["test"]
     report: dict = {}
+    out: dict = {}
     for round_ in range(FIX_ROUNDS + 1):
+        last = round_ == FIX_ROUNDS
         bad = unsafe(code)
         if bad:  # never run it: ask for a clean version
             problems = [f"scenes.js uses {', '.join(bad)} - not allowed (SAFETY); draw with the scene API only"]
@@ -255,16 +411,23 @@ async def run(app: dict, handoff: dict, documents: list[dict], work: Path, progr
             await progress(f"{name}: checking the layout, timing and pronunciation"
                            + (f" (fix {round_})" if round_ else ""))
             report = await run_cli(["check", str(project)], work)
-            problems = [f"[{i.get('level')}] scene {i.get('scene') or '-'}"
-                        + (f" at {i['t']} s" if i.get("t") is not None else "") + f": {i.get('message')}"
-                        for i in _issues(report)]
-        if not problems:
-            break
-        if round_ == FIX_ROUNDS:
-            if bad:
-                raise ExplainerError("the drawing code kept using things that are not allowed: " + ", ".join(bad))
-            await progress(f"{name}: {len(problems)} check note{'s' if len(problems) > 1 else ''} left; rendering anyway")
-            break
+            problems = bad_icons(code, names, tags) + [
+                f"[{i.get('level')}] scene {i.get('scene') or '-'}"
+                + (f" at {i['t']} s" if i.get("t") is not None else "") + f": {i.get('message')}"
+                for i in _issues(report)]
+        if bad and last:
+            raise ExplainerError("the drawing code kept using things that are not allowed: " + ", ".join(bad))
+        if not bad and (not problems or last):
+            if problems:
+                await progress(f"{name}: {len(problems)} check note{'s' if len(problems) > 1 else ''} left; rendering anyway")
+            await progress(f"{name}: rendering the video{' (fast quality)' if fast else ' with motion blur'}")
+            try:
+                out = await run_cli(["render", str(project)] + (["--quality", "fast"] if fast else []), work)
+                break
+            except ExplainerError as e:  # a scene that only fails while drawing: back to the writer, once more
+                if last:
+                    raise
+                problems = [f"[error] render failed: {str(e)[:600]}"]
         await progress(f"{name}: fixing {len(problems)} problem{'s' if len(problems) > 1 else ''} ({problems[0][:90]})")
         fixed = await _json(scenes_system + "\n\n" + FIX.replace("{ISSUES}", "\n".join(problems[:40])),
                             f"{scenes_user}\n\nCURRENT scenes.js:\n{code}", "engine.explainer.fix", 24000)
@@ -275,10 +438,6 @@ async def run(app: dict, handoff: dict, documents: list[dict], work: Path, progr
             await run_cli(["voice", str(project)], work)
         code = str(fixed.get("scenes_js") or code)
 
-    from . import story_engine
-    fast = story_engine.quality() is story_engine.QUALITY["test"]
-    await progress(f"{name}: rendering the video{' (fast quality)' if fast else ' with motion blur'}")
-    out = await run_cli(["render", str(project)] + (["--quality", "fast"] if fast else []), work)
     path = out.get("out") or str(project / "out" / "video.mp4")
     if not Path(path).exists():
         raise ExplainerError("explainroo rendered no video file")
@@ -300,13 +459,18 @@ def documents_of(run: dict) -> list[dict]:
 
 
 def wanted(run: dict) -> bool:
-    """Uploaded documents become an explainer: always in the Document Explainer mode; in Auto when the run has a
-    document and no footage or audio of the user's (those are edited or filmed by the other apps)."""
+    """Uploaded documents become an explainer: in the Documentary mode (and the older Document Explainer mode) whenever
+    a document is attached (with none, vox_doc_engine makes the topic a VOX documentary); in Auto when the run has a document and no footage or audio of
+    the user's (those are edited or filmed by the other apps)."""
     mode = run.get("mode")
     has_doc = any(a.get("modality") == "document" for a in (run.get("assets") or {}).values())
-    if mode == "explainer":
-        return True
+    if mode in ("documentary", "explainer"):  # the one Documentary mode: a file is explained, a topic is a VOX film
+        return has_doc
     footage = any(a.get("modality") in ("video", "audio") for a in (run.get("assets") or {}).values())
+    if mode == "auto" and has_doc:  # a novel or story text to turn into a short drama goes to the drama director
+        from .story_intel import drama
+        if drama.asks_for_drama(run.get("prompt") or ""):
+            return False
     return mode == "auto" and has_doc and not footage and not run.get("parent_run")
 
 

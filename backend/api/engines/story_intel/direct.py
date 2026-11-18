@@ -16,7 +16,7 @@ CAPS = ["story.multi_scene_storyboard", "story.character_consistency", "video.fr
 WITH_IMAGES = ["video.image_to_video"]
 PRODUCTION = {"children_story": ["animation", "narrative"], "fiction": ["narrative"], "puzzle_mystery": ["narrative"],
               "educational": ["explainer"], "documentary": ["documentary"], "product": ["advertisement"],
-              "other": ["narrative"]}
+              "short_drama": ["narrative"], "other": ["narrative"]}
 
 
 def applies(run: dict) -> bool:
@@ -42,7 +42,7 @@ def build(run: dict) -> dict:
     total = sum(float(s.get("duration_s") or 0) for s in scenes) or float(cls.get("duration_s") or 45)
     dur = int(round(max(10.0, min(120.0, total))))
     ar = (run.get("settings") or {}).get("aspect_ratio") or intel.get("aspect_ratio") or "9:16"
-    narrated = any((s.get("audio") or {}).get("type") == "narration" and (s.get("audio") or {}).get("line")
+    narrated = any((s.get("audio") or {}).get("type") in ("narration", "dialogue") and (s.get("audio") or {}).get("line")
                    for s in scenes if isinstance(s.get("audio"), dict))
     motion = intel.get("mode") == "motion_graphics"
     production = ["explainer", "animation"] if motion else PRODUCTION.get(cls.get("category"), ["narrative"])
