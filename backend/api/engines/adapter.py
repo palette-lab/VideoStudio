@@ -6,7 +6,8 @@ from pathlib import Path
 from router_core import config, registry
 from router_core.execution import RunDeleted
 
-from . import effects_engine, explainroo_engine, genres, motion_engine, music, opuscar_engine, presenter_engine, story_engine, vox_doc_engine
+from . import effects_engine, explainroo_engine, genres, motion_engine, music, opuscar_engine, presenter_engine, render3d_engine, story_engine, vox_doc_engine
+from .render3d import providers as r3d_providers, renderer as r3d_renderer, spec as r3d_spec
 
 GENERATE_PREFIXES = ("story.", "video.", "fashion.")
 # Edits this adapter really performs on existing footage (anything else fails honestly instead of a fake success).
@@ -79,6 +80,16 @@ class EngineAdapter:
                                      "duration_s": out["duration_s"], "title": out["title"],
                                      "story": out.get("why_style") or "", "genre": f"Programmatic film ({out['style_name']})",
                                      "subtitles_path": out.get("subtitles"), "script": out.get("script") or ""}]}
+            if app["app_id"] == render3d_engine.APP_ID:  # 3D Render: a 3D reference, then Kling 4.0 makes it real
+                assets = {aid: {**a, "summary": ((run or {}).get("perception", {}).get(aid) or {}).get("summary", "")}
+                          for aid, a in ((run or {}).get("assets") or {}).items()}
+                t0 = time.time()
+                out = await render3d_engine.run(app, step.get("handoff") or {"prompt": "", "request": {}}, work, prog, assets)
+                return {"status": "succeeded", "mock": False, "message": render3d_message(app, out, time.time() - t0),
+                        "outputs": [{"format": "video_file", "ref": f"file://{out['path']}", "path": out["path"],
+                                     "duration_s": out["duration_s"], "title": out["title"],
+                                     "story": out["render3d"]["spec"].get("logline") or "", "genre": "3D Render",
+                                     "render3d": out["render3d"]}]}
             if app["app_id"] == "palette-effects-studio":
                 videos = [i for i in inputs if i["format"] == "video_file"]
                 if not videos or any(not i.get("path") for i in videos):
@@ -255,10 +266,24 @@ class EngineAdapter:
             raise
         except (story_engine.EngineError, motion_engine.MotionError, effects_engine.EffectsError,
                 presenter_engine.PresenterError, explainroo_engine.ExplainerError, opuscar_engine.ProgrammaticError,
-                vox_doc_engine.DocumentaryError) as e:
+                vox_doc_engine.DocumentaryError, render3d_engine.Render3DError, r3d_renderer.RenderError,
+                r3d_spec.SpecError, r3d_providers.TransformError) as e:
             return {"status": "failed", "mock": False, "message": f"{app['name']}: {e}"}
         except Exception as e:  # a provider error is a failure, never a success
             return {"status": "failed", "mock": False, "message": f"{app['name']} failed: {type(e).__name__}: {str(e)[:400]}"}
+
+
+def render3d_message(app: dict, out: dict, seconds: float) -> str:
+    """Short: what the user gets (the details stay in the backend record)."""
+    r = out["render3d"]
+    title = r["spec"].get("title") or "the video"
+    if r.get("realize_error"):
+        return (f"{app['name']}: the 3D version of “{title}” is made, but the realistic video was not: "
+                f"{r['realize_error']}. Then press “Make it realistic” (the 3D part is not redone).")
+    if r.get("stage") == "reference":
+        return f"{app['name']}: the 3D version of “{title}” is ready; press “Make it realistic” for the realistic video."
+    pv = r.get("provider") or {}
+    return f"{app['name']} made “{title}” ({pv.get('label') or 'realistic video'}) in {seconds / 60:.1f} min."
 
 
 def _finish_note(out: dict) -> str:

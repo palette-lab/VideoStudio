@@ -49,6 +49,52 @@ LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "900"))
 STT_TIMEOUT_S = float(os.getenv("STT_TIMEOUT_S", "600"))
 PREFERRED_MODEL = os.getenv("PALETTE_LLM_MODEL", "")  # e.g. anthropic/claude-opus-5.5 (falls back to palette-llm-max)
 
+# One model per job, from the models the Palette LLM gateway serves (checked 2026-11-20: each answers JSON and reads
+# images with this app's key). The writer stays on the reasoning chain (PALETTE_LLM_MODEL, Opus first); the reviewer
+# and the checkers are other model families, so a mistake the writer makes is not judged by the same model that made
+# it. Each role is a comma-separated chain; a model that is unavailable or fails goes to the next one, and the old
+# default (palette-llm-max / palette-vlm) is always the last resort. Override one role with MODEL_<ROLE>=..., or all
+# with MODEL_ROLES='{"review": "..."}' (JSON).
+ROLE_MODELS = {
+    "classify": "anthropic/claude-sonnet-5.5",            # what the request is: fast and accurate
+    "events": "openai/gpt-5.5,anthropic/claude-opus-5.5",  # the temporal sequence analyst (reads the whole input)
+    "review": "google/gemini-3.1-pro-preview,openai/gpt-5.5",  # the independent plan reviewer
+    "solver": "openai/gpt-5.5",                           # the independent puzzle solver
+    "vision": "google/gemini-3.5-flash,palette-vlm",      # frame, scene, character and clip checks
+    "face": "google/gemini-3.1-pro-preview,google/gemini-3.5-flash,palette-vlm",  # is it the same person?
+    "scene3d": "anthropic/claude-opus-5.5,openai/gpt-5.5",  # 3D Render: stages the story as a 3D scene + timeline
+}
+STAGE_ROLES = {
+    "story.classify": "classify", "story.doc_route": "classify", "story.events": "events", "story.validate": "review", "engine.critic": "review",
+    "story.puzzle_solver": "solver", "engine.scene_qa": "vision", "engine.clip_qa": "vision",
+    "engine.story.consistency": "vision", "engine.story.identity": "vision", "engine.story.face": "face",
+    "engine.render3d.scene": "scene3d", "engine.render3d.fix": "scene3d", "engine.render3d.reference_check": "vision",
+    "engine.render3d.compare": "vision",
+}
+
+
+def role_models() -> dict[str, str]:
+    import json as _json
+    roles = dict(ROLE_MODELS)
+    try:
+        roles.update({k: str(v) for k, v in _json.loads(os.getenv("MODEL_ROLES") or "{}").items() if v})
+    except (ValueError, AttributeError):
+        pass
+    for k in list(roles):
+        if os.getenv(f"MODEL_{k.upper()}"):
+            roles[k] = os.environ[f"MODEL_{k.upper()}"]
+    return roles
+
+
+def model_for(stage: str, default: str) -> str:
+    """The model chain for a call's stage (its role), with the caller's model as the last resort."""
+    role = STAGE_ROLES.get(stage) or STAGE_ROLES.get(stage.rsplit(".", 1)[0] if stage.endswith(".continue") else "")
+    chain = role_models().get(role or "")
+    if not chain:
+        return default
+    models = [m.strip() for m in chain.split(",") if m.strip()]
+    return ",".join(dict.fromkeys(models + [default]))
+
 
 def configure(*, api_key: str | None = None, base_url: str | None = None, openmontage_dir: str | None = None,
               model: str | None = None) -> None:

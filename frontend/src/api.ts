@@ -109,6 +109,15 @@ export const api = {
     if (!res.ok) throw new Error(await readError(res))
     return URL.createObjectURL(await res.blob())
   },
+  /** 3D Render: one of the step's related files (reference, depth, normal, mask_characters, mask_objects, final,
+   *  comparison, sheet) as a local object URL. */
+  async render3dUrl(id: string, stepId: string, kind: string): Promise<string> {
+    const res = await apiFetch(`${BASE}/runs/${id}/render3d/${stepId}/${kind}`)
+    if (!res.ok) throw new Error(await readError(res))
+    return URL.createObjectURL(await res.blob())
+  },
+  /** 3D Render: the reviewed 3D reference becomes a realistic video (Kling 4.0; Seedance 2.0 only if Kling fails). */
+  realize: (id: string, stepId: string, instruction: string) => post(`/runs/${id}/render3d/${stepId}/realize`, { instruction }),
   async outputUrl(id: string, stepId: string): Promise<string> {
     const res = await apiFetch(`${BASE}/runs/${id}/output/${stepId}`)
     if (!res.ok) throw new Error(await readError(res))

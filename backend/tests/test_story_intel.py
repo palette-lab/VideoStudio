@@ -140,7 +140,7 @@ def test_develop_runs_the_agents_in_order(monkeypatch):
     monkeypatch.setattr(story_intel.research_, "gather", fake_gather)
     monkeypatch.setattr(story_intel.research_, "archive_photos", fake_archive)
     intel = asyncio.run(story_intel.develop("history of the titanic", duration_s=None))
-    assert calls == ["story.classify", "story.research", "story.documentary", "story.validate"]
+    assert calls == ["story.classify", "story.research", "story.events", "story.documentary", "story.validate"]
     assert intel["mode"] == "cinematic_doc"
     block = json.loads(story_intel.engine_block(intel))
     assert "cinematic documentary, 'wall' look" in block["mode"] and block["scenes"][0]["hero"]
@@ -267,7 +267,7 @@ def test_develop_cinematic_documentary_with_a_host(monkeypatch):  # the older me
     monkeypatch.setattr(story_intel.research_, "gather", fake_gather)
     monkeypatch.setattr(story_intel.research_, "archive_photos", fake_archive)
     intel = asyncio.run(story_intel.develop("history of the titanic", duration_s=None))
-    assert calls == ["story.classify", "story.research", "story.documentary", "story.validate"]
+    assert calls == ["story.classify", "story.research", "story.events", "story.documentary", "story.validate"]
     assert intel["mode"] == "cinematic_doc"
     block = json.loads(story_intel.engine_block(intel))
     assert "cinematic documentary, 'wall' look" in block["mode"] and block["scenes"][0]["hero"]
@@ -348,7 +348,7 @@ def test_motion_route_topic_ideas_and_palette_switch(monkeypatch):
     monkeypatch.setattr(story_intel.llm, "chat_json", fake)
     intel = asyncio.run(story_intel.develop("finance video ideas"))
     assert intel["mode"] == "motion_graphics" and len(intel["topic_ideas"]) == 5 and "plan" not in intel
-    assert stages == ["story.classify", "story.motion_director"]
+    assert stages == ["story.classify", "story.events", "story.motion_director"]
 
     seen = {}
 
@@ -451,7 +451,7 @@ def test_3d_motion_video_mode_forces_the_3d_director_for_any_topic(monkeypatch):
         raise AssertionError(kw["stage"])
     monkeypatch.setattr(story_intel.llm, "chat_json", fake)
     intel = asyncio.run(story_intel.develop("how sourdough rises", force_motion=True))
-    assert intel["mode"] == "motion_graphics" and stages == ["story.classify", "story.motion_director"]
+    assert intel["mode"] == "motion_graphics" and stages == ["story.classify", "story.events", "story.motion_director"]
     assert pipeline.APP_MODES["motion3d"] == "pltt-storyboard-video-maker"
     stages.clear()  # without the mode the food agent keeps the cooking film
     assert asyncio.run(story_intel.develop("how sourdough rises")).get("skipped") and stages == ["story.classify"]

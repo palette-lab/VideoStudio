@@ -75,10 +75,15 @@ def chain() -> list[str]:
 
 
 def pick_model(model: str, skip: set[str] | frozenset = frozenset()) -> str:
+    """The model to call: `model` may be one name or a comma-separated chain (a job's role, config.model_for); the
+    first one not skipped and not marked unavailable answers, then the reasoning chain."""
     now = time.time()
-    if model != UPGRADE_FROM:  # a model asked for by name (e.g. Opus for motion): the reasoning chain when it is off
-        if model not in skip and _down_until.get(model, 0) <= now:
-            return model
+    for m in [x.strip() for x in model.split(",") if x.strip()]:
+        if m == UPGRADE_FROM:
+            break
+        if m not in skip and _down_until.get(m, 0) <= now:
+            return m
+    if model != UPGRADE_FROM:
         log.warning("%s is not available for this key; using the %s chain", model, UPGRADE_FROM)
     return next((m for m in chain() if m not in skip and _down_until.get(m, 0) <= now), UPGRADE_FROM)
 
@@ -119,6 +124,7 @@ def summarize(entries: list[dict]) -> dict:
         "completion_tokens": pout,
         "latency_s": round(sum(e.get("latency_s") or 0 for e in live), 2),
         "by_stage": {s: sum(1 for e in entries if e.get("stage") == s) for s in sorted({e.get("stage") or "" for e in entries})},
+        "by_model": {m: sum(1 for e in entries if e.get("model") == m) for m in sorted({e.get("model") or "" for e in entries})},
         "estimated_cost_usd": round(pin / 1000 * config.PRICE_IN_PER_1K + pout / 1000 * config.PRICE_OUT_PER_1K, 4)
         if priced else None,
         "cost_note": None if priced else "Token prices are not configured, so no cost estimate.",
@@ -138,6 +144,7 @@ async def chat_json(model: str, messages: list[dict], max_tokens: int = 6000, re
                     stage: str = "chat") -> dict:
     if not config.LLM_API_KEY:
         raise LLMError("PALETTE_API_KEY is not set in .env")
+    model = config.model_for(stage, model)  # one model per job (config.ROLE_MODELS)
     body = {
         "model": model,
         "messages": messages,
@@ -183,6 +190,8 @@ async def chat_json(model: str, messages: list[dict], max_tokens: int = 6000, re
             _record(stage=stage, model=used, ok=False, cached=False, latency_s=round(time.monotonic() - started, 2),
                     attempt=attempt + 1, error=str(e)[:200])
             log.warning("LLM call failed (attempt %s, model %s, stage %s): %s", attempt + 1, used, stage, e)
+            if "," in model:  # a job's chain: the retry goes to its next model, not the one that just failed
+                skip.add(used)
             attempt += 1
     raise LLMError(f"LLM call failed: {last_err}")
 

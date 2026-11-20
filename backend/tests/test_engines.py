@@ -34,6 +34,9 @@ def test_engine_plans_makes_stills_clips_and_joins(app_id, tmp_path, monkeypatch
         if kw.get("stage") == "engine.story.consistency":
             seen["checks"] = seen.get("checks", 0) + 1
             return {"same": True, "differences": []}
+        if kw.get("stage") == "engine.story.face":  # the face-only identity check beside it
+            seen["faces"] = seen.get("faces", 0) + 1
+            return {"faces": [{"name": "girl", "visible": True, "score": 9, "box": [0.3, 0.1, 0.7, 0.5]}]}
         if kw.get("stage") == "engine.graphics_director":
             seen["director"] = True
             return {"add_graphics": False, "why": "a mood story; the pictures carry it"}
@@ -81,7 +84,8 @@ def test_engine_plans_makes_stills_clips_and_joins(app_id, tmp_path, monkeypatch
         return {"images": [{"url": f"https://fal.media/still{seen['images']}.png"}]}
 
     def fake_video(key, model, prompt, **kw):
-        assert model == "seedance_2_0" and kw["resolution"] == "480p" and kw["audio"] is False and kw["start_image"]
+        # realistic people: Seedance refuses them as real persons, so the clip goes to Kling (with her elements)
+        assert model == "kling_3_0_standard" and kw["audio"] is False and kw["start_image"]
         url = f"https://fal.media/clip{len(seen['videos'])}.mp4"
         seen["videos"].append(kw["duration"])
         return {"video": {"url": url}}
@@ -121,11 +125,13 @@ def test_engine_plans_makes_stills_clips_and_joins(app_id, tmp_path, monkeypatch
     assert len(out["scenes"]) == 2
     assert seen["qa"] == 4  # every frame analysed (3) plus the redraw re-checked
     assert out["scenes"][0]["qa"]["first"] == {"issues": [], "redrawn": True,
-                                               "fixed": ["an extra plate on the table -> remove it"]}
+                                               "fixed": ["MAJOR: an extra plate on the table -> remove it"]}
     assert out["scenes"][0]["image_prompt"] and out["scenes"][0]["motion_prompt"]
     assert seen["clip_qa"] == 2 and out["scenes"][1]["qa"]["clip"] == {"issues": [], "retaken": False}
     # the character check runs on both first frames and on the last frame the clip lands on
     assert out["plan"]["cast_sheet_url"] == "https://fal.media/passport.png" and seen["checks"] == 3
+    assert seen["faces"] == 3 and any("realistic people in this film" in m for m in msgs)
+    assert out["clip_models"][0] == "kling_4_0" and out["clip_models"][-1] == "seedance_2_0"
     assert out["plan"]["cast"][0]["back"] == "https://fal.media/back.png"
     assert out["plan"]["total"] == 10 and out["plan"]["requested_total"] == 40  # test quality caps the length
     assert 9.5 < out["duration_s"] < 10.5
@@ -272,7 +278,7 @@ def test_character_drift_is_redrawn_once(monkeypatch):
     monkeypatch.setattr(story_engine.llm, "chat_json", fake_chat)
     p = {"bible": {"characters": "girl in a red raincoat and red rain boots"}}
     assert asyncio.run(story_engine.consistency_issues("https://s/sheet.png", "https://s/still.png", p)) == [
-        "pink sneakers instead of red rain boots"]
+        "MINOR: pink sneakers instead of red rain boots"]  # untagged and no face / hair / outfit word: minor
 
 
 def test_continuity_sheet_becomes_hard_rules():
@@ -500,10 +506,12 @@ def test_places_are_drawn_first_and_every_scene_is_drawn_inside_its_place(tmp_pa
             imgs = [p["image_url"]["url"] for p in messages[0]["content"][1:]]
             assert imgs[-2] in ("https://fal.media/plate_L1.png", "https://fal.media/plate_L2.png")  # the place too
             if seen["checks"] == 1:  # the first still has the wrong pyjamas
-                return {"same": False, "differences": ["plain navy pyjamas instead of striped"]}
+                return {"same": False, "differences": ["MAJOR: plain navy pyjamas instead of striped"]}
             return {"same": True, "differences": []}
         if st in ("engine.critic",):
             return {"score": 90, "issues": []}
+        if st == "engine.story.face":
+            return {"faces": []}
         if st in ("engine.scene_qa", "engine.clip_qa"):
             return {"ok": True, "issues": []}
         if st == "engine.graphics_director":

@@ -26,7 +26,7 @@ def test_real_registry_has_exactly_the_three_apps():
     assert set(registry.apps()) == {"pltt-flow-video-2", "pltt-storyboard-video-maker", "palette-video-smart",
                                     "palette-motion-studio", "palette-effects-studio", "palette-presenter-studio",
                                     "explainroo-document-explainer", "opuscar-programmatic-film",
-                                    "vox-editorial-documentary"}
+                                    "vox-editorial-documentary", "render3d-realistic-video"}
 
 
 async def test_single_clip_goes_to_flow_video():

@@ -1,7 +1,7 @@
 """Each app's own planner prompt (vendored verbatim) plus the user message in the shape that app sends."""
 
 import re
-from . import genres, motion_design
+from . import flow_budget, genres, motion_design
 from .vendor.flow import model_skills
 from .vendor.flow import planner_prompts as flow
 from .vendor.storyboard import planner_prompts as storyboard
@@ -44,7 +44,7 @@ def prompt_for(app_id: str, brief: str, total: int, aspect: str, lo: int, hi: in
         story = choreography.planner_rules(recipe, n_max)
         book = genres.playbook(genre, total, choreography.COOKING_METHOD, voice="none")
     else:
-        story = scene_rules()
+        story = scene_rules() + flow_budget.flow_budget(total)
         book = genres.playbook(genre, total, method)
     system += (book + story + voice_rules(q.get("audio", False))
                + motion_design.planning_rules(genre) + genres.openmontage_guides(genre, total))
@@ -186,6 +186,9 @@ SCENES (add these fields to EVERY scene object, overriding any rule above about 
   scene's "start_state" MUST pick up from the previous scene's "end_state": the same subject, the same wardrobe,
   props, set and light, continuing the same moment or the next moment of it (a closer angle of the same moment, the
   motion carried through the cut, or a match cut on the same shape or movement).
+- Flow, never teleporting: when a character comes into a place or leaves it, SHOW the move (walking the corridor,
+  climbing the stairs, knocking, pushing the door open, stepping in and looking around, walking out) instead of
+  cutting to them already there. Say it in start_state / action and in the link.
 - "link": one short line saying how this scene connects to the previous one (e.g. "continues her motion: the hand
   that closed the case now lifts the headphones", "match cut: the spinning ear cup becomes the spinning vinyl").
   Scene 1: "opening".

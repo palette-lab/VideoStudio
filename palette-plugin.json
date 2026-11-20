@@ -108,6 +108,11 @@
       "required": false,
       "help": "LLM Router address (default https://router-api.pltt.ai; any path after the host is ignored)."
     },
+    "MODEL_ROLES": {
+      "scope": "plugin",
+      "required": false,
+      "help": "Optional JSON: a model chain per job, e.g. {\"review\": \"google/gemini-3.1-pro-preview,openai/gpt-5.5\"}. Jobs: classify, events, review, solver, vision, face. The story writer uses PALETTE_LLM_MODEL."
+    },
     "PALETTE_VIDEO_QUALITY": {
       "scope": "plugin",
       "required": false,

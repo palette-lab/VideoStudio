@@ -5,7 +5,7 @@ import { useT, examplesFor, type T } from "./i18n"
 import { EditableVideo } from "./textEditor"
 
 // Modes in the menu. Presenter Studio and the HyperFrames Motion Studio stay in the backend (Auto still picks them).
-const MODES = ["auto", "storyboard", "flow", "motion3d", "documentary", "programmatic"]
+const MODES = ["auto", "storyboard", "flow", "motion3d", "documentary", "programmatic", "render3d"]
 const MODE_IDS = new Set(MODES)
 const BUSY = new Set(["analyzing", "approved", "executing"])
 // Once a plan is approved the video is being made (or was made): these runs get the stage on the right.
@@ -212,6 +212,7 @@ export default function App() {
                 onCancel={() => act(() => api.cancel(r.id))()}
                 onRerender={(n: number, how: string, sid?: string) => act(() => api.rerenderScene(r.id, n, how, sid))()}
                 onText={(sid: string, items: any[]) => act(() => api.saveText(r.id, sid, items))()}
+                onRealize={(sid: string, how: string) => act(() => api.realize(r.id, sid, how))()}
               />
             ))}
             <div ref={endRef} />
@@ -386,7 +387,7 @@ function Composer({ hero, busy, placeholder, defaultMode, onSend }: {
         <button className="vr-chipbtn" onClick={() => input.current?.click()} aria-label={t("composer.addFilesAria")}>
           {I.clip}<span>{files.length ? t("composer.filesAdded", { n: files.length }) : hero ? t("composer.addFiles") : ""}</span>
         </button>
-        <input ref={input} type="file" multiple hidden accept="image/*,video/*,audio/*,.pdf,.txt,.md,.docx,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(e) => { add(e.target.files); e.target.value = "" }} />
+        <input ref={input} type="file" multiple hidden accept="image/*,video/*,audio/*,.pdf,.txt,.md,.docx,.glb,.gltf,.fbx,.obj,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(e) => { add(e.target.files); e.target.value = "" }} />
         <label className={`vr-pick ${length ? "on" : ""}`} title={t("composer.lengthHint")}>
           {I.clock}
           <select aria-label={t("composer.length")} value={length} onChange={(e) => setLength(e.target.value)}>
@@ -660,6 +661,7 @@ function StoryPanel({ run, onEdit, onRegen, onPalette, onMotionEngine }: { run: 
             {plan.style?.effects_plan?.length > 0 && <ul>{plan.style.effects_plan.map((e: any, i: number) => <li key={i}>Scene {e.scene}: {e.effect} <span className="vr-muted">— {e.why}</span></li>)}</ul>}
           </details>
         )}
+        {intel.temporal?.coverage && <SequencePanel run={run} seq={intel.temporal} />}
         <div className="vr-story-scenes">
           {plan.scenes.map((s: any) => <StoryScene key={`${s.n}-${s.title}`} s={s} editable={editable} onEdit={onEdit} onRegen={onRegen} />)}
         </div>
@@ -679,6 +681,45 @@ function StoryPanel({ run, onEdit, onRegen, onPalette, onMotionEngine }: { run: 
         })()}
       </div>
     </Fold>
+  )
+}
+
+/** The temporal sequence: every event in order, which scene shows it, each scene's continuity, and after the render
+ *  whether each clip really showed its events (PASS / FAIL with the codes / UNCERTAIN = watch it yourself). */
+function SequencePanel({ run, seq }: { run: Run; seq: any }) {
+  const cov = seq.coverage, pace = seq.pacing || {}
+  const made: any[] = Object.values(run.execution || {}).flatMap((ex: any) => ex.outputs || []).find((o: any) => o.scenes?.length)?.scenes || []
+  const verdicts = made.map((sc: any) => sc.qa?.clip?.sequence).filter(Boolean)
+  const failed = verdicts.filter((v: any) => v.status === "FAIL").length, unsure = verdicts.filter((v: any) => v.status === "UNCERTAIN").length
+  const seqIssues = (seq.issues || []).filter((i: any) => i.code)
+  const label: Record<string, string> = { PASS: "sequence shown", FAIL: "sequence problem", UNCERTAIN: "not verified - watch it" }
+  return (
+    <details className="vr-story-sec vr-seq" open={cov.missing?.length > 0 || failed > 0}>
+      <summary>Sequence · {cov.covered}/{cov.total} events in scenes{cov.missing?.length ? ` · ${cov.missing.length} missing` : ""}
+        {verdicts.length ? ` · clips: ${verdicts.length - failed - unsure} ok${failed ? `, ${failed} failed` : ""}${unsure ? `, ${unsure} unverified` : ""}` : ""}</summary>
+      {pace.note && <p className="vr-muted sm">{pace.note}</p>}
+      <ol className="vr-seq-events">
+        {cov.events.map((e: any) => (
+          <li key={e.id} className={e.scene ? "" : e.essential ? "vr-qa-bad" : "vr-muted"}>
+            <b>{e.id}</b> {e.description}
+            <span className="vr-muted sm"> · {e.scene ? `scene ${e.scene}` : e.essential ? "in no scene" : "optional, condensed"}
+              {e.requires?.length ? ` · after ${e.requires.join(", ")}` : ""}{e.parallel_with?.length ? ` · with ${e.parallel_with.join(", ")}` : ""}
+              {e.condition ? ` · if ${e.condition}` : ""} · ~{e.duration_s} s</span>
+          </li>))}
+      </ol>
+      {seqIssues.length > 0 && <ul className="sm">{seqIssues.slice(0, 10).map((i: any, k: number) =>
+        <li key={k} className={["MISSING_EVENT", "WRONG_EVENT_ORDER", "CAUSALITY_ERROR", "INCOMPLETE_ACTION"].includes(i.code) ? "vr-qa-bad" : "vr-muted"}>
+          <code>{i.code}</code> {i.scene ? `scene ${i.scene}: ` : ""}{i.problem}</li>)}</ul>}
+      <details className="sm"><summary>Continuity, scene by scene</summary>
+        {(seq.scenes || []).map((r: any) => {
+          const v = made[r.n - 1]?.qa?.clip?.sequence
+          return <p key={r.n}><b>Scene {r.n}</b> {r.events.join(" → ") || "no events"}
+            {made[r.n - 1]?.handoff ? <span className="vr-chip">{({ exact: `starts on scene ${r.n - 1}'s last frame`, draw: `drawn from scene ${r.n - 1}'s last frame`, ref: `look carried from scene ${r.n - 1}'s last frame` } as any)[made[r.n - 1].handoff]}</span> : null}
+            {v && <span className={v.status === "PASS" ? "vr-good" : "vr-qa-bad"}> · {label[v.status] || v.status}{v.codes?.length ? ` (${v.codes.join(", ")})` : ""}</span>}
+            <br /><span className="vr-muted">{String(r.brief || "").split("\n").slice(1).join(" · ")}</span></p>
+        })}
+      </details>
+    </details>
   )
 }
 
@@ -790,10 +831,10 @@ function Analysis({ run }: { run: Run }) {
   )
 }
 
-function Answer({ run, latest, staged, onAnswer, onApprove, onRecover, onSelect, onRerun, onCancel, onRerender, onText }: any) {
+function Answer({ run, latest, staged, onAnswer, onApprove, onRecover, onSelect, onRerun, onCancel, onRerender, onText, onRealize }: any) {
   const { t } = useT()
   const s = run.status
-  if (s === "analyzing") return latest ? <div className="vr-row"><button className="vr-ghost sm" onClick={onCancel}>{t("chat.cancel")}</button></div> : null
+  if (s === "analyzing") return latest ? <div className="vr-row"><button className="vr-ghost sm" onClick={onCancel} disabled={!!run.cancel_requested}>{run.cancel_requested ? t("studio.stopping") : t("chat.cancel")}</button></div> : null
   if (s === "draft") return null
   if (s === "superseded") return <p className="vr-muted sm">{t("chat.replaced")}</p>
   if (s === "error") return (
@@ -819,7 +860,7 @@ function Answer({ run, latest, staged, onAnswer, onApprove, onRecover, onSelect,
     )
   }
   if (!run.plan) return null
-  return <PlanAnswer run={run} latest={latest} staged={staged} onApprove={onApprove} onRecover={onRecover} onSelect={onSelect} onRerun={onRerun} onRerender={onRerender} onText={onText} />
+  return <PlanAnswer run={run} latest={latest} staged={staged} onApprove={onApprove} onRecover={onRecover} onSelect={onSelect} onRerun={onRerun} onRerender={onRerender} onText={onText} onRealize={onRealize} />
 }
 
 function Ask({ run, live, onAnswer, onRerun }: any) {
@@ -859,7 +900,7 @@ function Ask({ run, live, onAnswer, onRerun }: any) {
   )
 }
 
-function PlanAnswer({ run, latest, staged, onApprove, onRecover, onSelect, onRerun, onRerender, onText }: any) {
+function PlanAnswer({ run, latest, staged, onApprove, onRecover, onSelect, onRerun, onRerender, onText, onRealize }: any) {
   const { t } = useT()
   const { plan, apps } = run
   const [accept, setAccept] = useState(false)
@@ -931,7 +972,7 @@ function PlanAnswer({ run, latest, staged, onApprove, onRecover, onSelect, onRer
         </div>
       )}
 
-      {run.report && <Result run={run} staged={staged} onRerender={onRerender} onText={onText} />}
+      {run.report && <Result run={run} staged={staged} onRerender={onRerender} onText={onText} onRealize={onRealize} />}
     </div>
   )
 }
@@ -1105,8 +1146,8 @@ function textLayerOf(run: Run, last: any) {
 }
 const textBusy = (run: Run) => run.status === "executing" && !!run.rerender?.text
 
-function Result({ run, staged, onRerender, onText }: { run: Run; staged?: boolean; onRerender?: (n: number, how: string, sid?: string) => void
-  onText?: (sid: string, items: any[]) => void }) {
+function Result({ run, staged, onRerender, onText, onRealize }: { run: Run; staged?: boolean; onRerender?: (n: number, how: string, sid?: string) => void
+  onText?: (sid: string, items: any[]) => void; onRealize?: (sid: string, how: string) => void }) {
   const { t } = useT()
   const r = run.report
   const { last, url, err } = useRunVideo(run)
@@ -1119,6 +1160,7 @@ function Result({ run, staged, onRerender, onText }: { run: Run; staged?: boolea
         <p><strong>{r.success ? t("result.ready") : r.mock ? t("result.sim") : t("result.notFinished")}</strong>{" "}
           {r.success ? t("result.playing") : r.mock ? t("result.simBody") : t("result.failBody")}</p>
         {last && <SceneList run={run} last={last} onRerender={onRerender} />}
+        {last?.outputs?.[0]?.render3d && <Render3DPanel run={run} stepId={last.step_id} r={last.outputs[0].render3d} onRealize={onRealize} />}
         <UsagePanel run={run} />
       </div>
     )
@@ -1148,7 +1190,21 @@ function Result({ run, staged, onRerender, onText }: { run: Run; staged?: boolea
         </div>
       )}
       {last && <SceneList run={run} last={last} onRerender={onRerender} />}
+      {last?.outputs?.[0]?.render3d && <Render3DPanel run={run} stepId={last.step_id} r={last.outputs[0].render3d} onRealize={onRealize} />}
       <UsagePanel run={run} />
+    </div>
+  )
+}
+
+/** 3D Render: nothing extra in the chat - the realistic video is the result. Only when the user asked to see the 3D
+ *  version first does it wait, with one button to go on. */
+function Render3DPanel({ run, stepId, r, onRealize }: { run: Run; stepId: string; r: any; onRealize?: (sid: string, how: string) => void }) {
+  const { t } = useT()
+  if (r.stage !== "reference" || !onRealize || run.status === "executing") return null
+  return (
+    <div className="vr-r3d-go">
+      {r.realize_error && <p className="vr-bad sm">{t("r3d.notRealistic")} {r.realize_error}</p>}
+      <button className="vr-cta" onClick={() => onRealize(stepId, "")}>{t("r3d.realize")}</button>
     </div>
   )
 }
@@ -1225,7 +1281,9 @@ function SceneCheck({ qa }: { qa?: Record<string, { issues?: string[]; redrawn?:
   if (!qa || !Object.keys(qa).length) return null
   const left = Object.values(qa).flatMap(r => r.issues || [])
   const fixed = Object.values(qa).flatMap(r => (r.redrawn || r.retaken ? r.fixed || [] : []))
-  if (!left.length) return <span className="vr-good">{t("result.checkPassed")}{fixed.length ? ` · fixed ${fixed.length}` : ""}</span>
+  const seq = (qa as any).clip?.sequence
+  if (seq?.status === "UNCERTAIN") return <span className="vr-qa-bad">Sequence not verified automatically - watch this scene</span>
+  if (!left.length) return <span className="vr-good">{t("result.checkPassed")}{seq?.status === "PASS" ? " · sequence shown" : ""}{fixed.length ? ` · fixed ${fixed.length}` : ""}</span>
   return <span className="vr-qa-bad" title={left.join("\n")}>{t("result.checkFail")} {left[0]}{left.length > 1 ? ` (+${left.length - 1})` : ""}</span>
 }
 

@@ -37,7 +37,7 @@ from engines import adapter as engine_adapter
 from engines import story_intel
 from engines.story_intel import research as story_research
 from engines import explainroo_engine
-from engines import opuscar_engine, vox_doc_engine
+from engines import doc_router, opuscar_engine, render3d_engine, vox_doc_engine
 from engines.story_intel import direct as story_direct
 from models import Run
 from router_core import config, execution, fallback, llm, perception, pipeline, registry, validator
@@ -50,20 +50,21 @@ router = PluginRouter(tags=["palette-video"])
 READ = [require_permission("resources:read")]
 WRITE = [require_permission("resources:write")]
 MODES = {"auto", "normal", "hybrid", "analyze", "storyboard", "flow", "motion", "presenter", "motion3d", "explainer",
-         "programmatic", "documentary"}
+         "programmatic", "documentary", "render3d"}
 BUSY = {"analyzing", "approved", "executing"}
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 EXT_MODALITY = {".jpg": "image", ".jpeg": "image", ".png": "image", ".webp": "image", ".heic": "image",
                 ".mp4": "video", ".mov": "video", ".webm": "video", ".mkv": "video", ".m4v": "video",
                 ".mp3": "audio", ".wav": "audio", ".m4a": "audio", ".aac": "audio", ".ogg": "audio", ".flac": "audio",
-                ".pdf": "document", ".txt": "document", ".md": "document", ".docx": "document"}
+                ".pdf": "document", ".txt": "document", ".md": "document", ".docx": "document",
+                ".glb": "model", ".gltf": "model", ".fbx": "model", ".obj": "model"}  # 3D Render props
 DOC_TYPES = ("application/pdf", "text/plain", "text/markdown",
              "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 
 def _media(assets: dict) -> dict:
     """The files the router and the apps work with: documents are source material for the story, not footage."""
-    return {k: v for k, v in assets.items() if v.get("modality") != "document"}
+    return {k: v for k, v in assets.items() if v.get("modality") not in ("document", "model")}
 
 
 # ---------------------------------------------------------------- runtime configuration (per request / job)
@@ -72,7 +73,7 @@ def _configure(ctx: PluginContext) -> None:
     config.configure(api_key=ctx.secret("PALETTE_API_KEY") or "", base_url=ctx.secret("PALETTE_LLM_BASE_URL"),
                      openmontage_dir=ctx.secret("OPENMONTAGE_DIR"), model=ctx.secret("PALETTE_LLM_MODEL") or "")
     for name in ("FAL_KEY", "PALETTE_VIDEO_QUALITY", "OPENMONTAGE_GUIDES_DIR", "RESEARCH_CONTACT",
-                 "LLM_ROUTER_API_KEY", "LLM_ROUTER_BASE_URL"):  # the engines read these from the environment
+                 "LLM_ROUTER_API_KEY", "LLM_ROUTER_BASE_URL", "MODEL_ROLES"):  # the engines read these from the environment
         value = ctx.secret(name)
         if value:
             os.environ[name] = value
@@ -153,6 +154,8 @@ def _public(run: dict) -> dict:
         o.pop("clean_path", None)
         o["has_clean"] = bool(o.pop("clean_storage", None))  # the text-free video, for the editable text layer
         o["version"] = len(o.pop("versions", None) or [])  # bumps when a scene is re-rendered
+        if o.get("render3d"):
+            o["render3d"] = _public_render3d(o["render3d"])
         for sc in o.get("scenes") or []:
             sc.pop("local_clip", None)
             sc["stored"] = sorted((sc.pop("storage", None) or {}).keys())  # which media the scene route serves
@@ -197,7 +200,7 @@ def _modality(f: UploadFile) -> str | None:
             return m
     if ct in DOC_TYPES:
         return "document"
-    return EXT_MODALITY.get(Path(f.filename or "").suffix.lower())
+    return EXT_MODALITY.get(Path(f.filename or "").suffix.lower())  # 3D models (.glb...) arrive as octet-stream
 
 
 async def _materialize(path_or_url: str, dest: Path) -> str:
@@ -226,8 +229,86 @@ async def _local_assets(run: dict) -> None:
 
 # ---------------------------------------------------------------- jobs
 
+# Cancel used to wait for the job's next save point, so a long model call ("Understanding the request", a story
+# draft, a clip render) kept running for minutes after the user pressed it. Each job body now runs beside a watcher
+# that asks the platform every CANCEL_POLL_S whether this job was cancelled and stops it at once, mid-call.
+CANCEL_POLL_S = 1.0
+
+
+async def _stoppable(execution_: JobExecution, work) -> tuple[bool, object]:
+    """Run a job body; (True, None) when Cancel stopped it, else (False, its result). The watcher only asks the
+    platform's job service (never the job's database session, which the body is using)."""
+    task = asyncio.ensure_future(work)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=CANCEL_POLL_S)
+            if done:
+                return False, task.result()
+            try:
+                stop = bool(await execution_.cancelled())
+            except Exception:  # no cancel signal in this runtime: the save-point check still stops the job
+                stop = False
+            if stop:
+                task.cancel()
+                try:
+                    await task
+                except BaseException:  # noqa: BLE001 - the body's own end (cancelled, or failing on the way out)
+                    pass
+                return True, None
+    except asyncio.CancelledError:  # the job itself was stopped (timeout, shutdown): stop the body too
+        task.cancel()
+        raise
+
+
+async def _finish_cancelled(ctx: PluginContext, payload: dict, kind: str) -> dict:
+    """The run a stopped job leaves behind, marked as the user wanted: cancelled (a re-render: the film unchanged)."""
+    rid = payload["run_id"]
+    try:
+        await ctx.db.rollback()  # the body may have been stopped inside a database call
+    except Exception:
+        pass
+    try:
+        run = await _load(ctx, rid)
+    except HTTPException:
+        return {"run_id": rid, "status": "deleted"}
+    if kind == "realize":  # the 3D reference is still there; the realistic render simply did not happen
+        ex = (run.get("execution") or {}).get(payload.get("step_id") or "") or {}
+        run["status"] = "completed"
+        ex["message"] = "Realistic render cancelled; the 3D reference is unchanged."
+        run.pop("rerender", None)
+        run["cancel_requested"] = False
+        _event(run, ex["message"])
+    elif kind == "rerender":
+        n = payload.get("scene")
+        ex = (run.get("execution") or {}).get(payload.get("step_id") or "") or {}
+        run["status"] = "completed"  # the film as it was is still there
+        ex["message"] = f"Scene {n} re-render cancelled; the film is unchanged."
+        run.pop("rerender", None)
+        run["cancel_requested"] = False
+        _event(run, ex["message"])
+    else:
+        run.update(status="cancelled", stage=None)
+        for ex in (run.get("execution") or {}).values():
+            if ex.get("status") == "running":
+                ex.update(status="cancelled", message="Cancelled by you: nothing more was generated for this step.",
+                          finished_at=time.time())
+            elif ex.get("status") in ("queued", "planned"):
+                ex["status"] = "not_run"
+        _event(run, "Cancelled")
+        if kind == "execute":
+            run["report"] = execution.build_report(run)
+    run["usage"] = llm.usage_summary(run)
+    await _save(ctx, run)
+    return {"run_id": rid, "status": run["status"]}
+
+
 @job("palette_video.analyze", timeout_seconds=3600, max_attempts=1)  # story writing can take several long calls
 async def analyze_job(ctx: PluginContext, execution_: JobExecution, payload: dict):
+    stopped, out = await _stoppable(execution_, _analyze(ctx, execution_, payload))
+    return await _finish_cancelled(ctx, payload, "analyze") if stopped else out
+
+
+async def _analyze(ctx: PluginContext, execution_: JobExecution, payload: dict):
     _configure(ctx)
     run = await _load(ctx, payload["run_id"])
     run["job"] = {"id": execution_.id, "name": "palette_video.analyze", "started_at": time.time()}
@@ -259,22 +340,32 @@ async def analyze_job(ctx: PluginContext, execution_: JobExecution, payload: dic
                     r = {"error": f"Could not analyse this file: {e}"}
                 run["perception"][a["id"]] = r
                 a["tags"] = r.get("tags", [])
+        docs_text = [d for d in (run.get("documents") or {}).values() if d.get("text")]
+        if run["mode"] == "auto" and docs_text and not run.get("parent_run") and "doc_route" not in run:
+            # what the document IS decides the studio, never its file type (doc_router)
+            await _save(ctx, run)
+            run["doc_route"] = await doc_router.route(run["prompt"], docs_text)
+            r = run["doc_route"]
+            _event(run, f"Read the document: {r['kind']} -> {r['label']}" + (f" ({r['why']})" if r.get("why") else ""))
         explainer = explainroo_engine.wanted(run)
         if explainer:  # documents -> Document Explainer: it reads and analyses them itself, no story or enhancer
             _event(run, f"Document Explainer: {len(explainroo_engine.documents_of(run))} document(s) to explain")
         from engines import as_written
         written = not explainer and not run.get("parent_run") and bool(as_written.parse(run["prompt"]))
-        programmatic = not explainer and not written and opuscar_engine.wanted(run)
+        render3d = not explainer and not written and render3d_engine.wanted(run)
+        if render3d:  # 3D Render: it understands and stages the story itself, no story writer or enhancer
+            _event(run, "3D Render: the story becomes a 3D scene, then Kling 4.0 makes it realistic")
+        programmatic = not explainer and not written and not render3d and opuscar_engine.wanted(run)
         if programmatic:  # a film drawn in code: it writes its own script and look, no story or enhancer
             style = opuscar_engine.named_style(run["prompt"])
             _event(run, "Programmatic Film" + (f": the {opuscar_engine.STYLES[style]['name']} look" if style else ""))
-        documentary = not explainer and not programmatic and not written and vox_doc_engine.wanted(run)
+        documentary = not explainer and not programmatic and not written and not render3d and vox_doc_engine.wanted(run)
         if documentary:  # the VOX documentary: it writes its own script from the playbook, no story or enhancer
             _event(run, "VOX Documentary (the Made by AI Playbook)")
-        if run.get("parent_run") and not explainer and not programmatic and await _next_episode(ctx, run):
+        if run.get("parent_run") and not explainer and not programmatic and not render3d and await _next_episode(ctx, run):
             _event(run, "Next episode written with the series' cast and story so far")
         if ("enhanced_prompt" not in run and not run.get("parent_run") and not explainer and not programmatic
-                and not documentary):
+                and not documentary and not render3d):
             run["stage"] = "enhancing"
             _event(run, "Enhancing the prompt")
             await _save(ctx, run)
@@ -310,6 +401,8 @@ async def analyze_job(ctx: PluginContext, execution_: JobExecution, payload: dic
                        f"it, but the words above win wherever they differ):\n{planned}")
         if explainer:
             res = _explainer_result(run)
+        elif render3d:
+            res = _render3d_result(run)
         elif programmatic:
             res = _programmatic_result(run)
         elif documentary:
@@ -381,6 +474,20 @@ def _programmatic_result(run: dict) -> dict:
                                                                     if missing else [])
     _event(run, "Plan: a Programmatic Film drawn in code" if not blocking
            else "The Programmatic Film cannot be made here")
+    return {"understanding": d["understanding"], "plan": d["plan"], "issues": issues, "questions": [],
+            "plan_mode": run["mode"], "status": "not_possible" if blocking else "awaiting_approval",
+            "blocking_reasons": blocking}
+
+
+def _render3d_result(run: dict) -> dict:
+    """3D Render: one step (3D reference, review, Kling 4.0), or why it cannot be made here."""
+    missing = render3d_engine.available()
+    d = render3d_engine.build(run)
+    issues = validator.validate(d["plan"], d["understanding"], run["mode"], _media(run["assets"]))
+    blocking = [i["message"] for i in validator.errors(issues)] + ([f"3D Render cannot run here: {missing}"]
+                                                                    if missing else [])
+    _event(run, "Plan: 3D Render stages the story in 3D, then makes it realistic" if not blocking
+           else "3D Render cannot make this video here")
     return {"understanding": d["understanding"], "plan": d["plan"], "issues": issues, "questions": [],
             "plan_mode": run["mode"], "status": "not_possible" if blocking else "awaiting_approval",
             "blocking_reasons": blocking}
@@ -466,6 +573,11 @@ def _refresh_direct_plan(run: dict) -> None:
 
 @job("palette_video.execute", timeout_seconds=7200, max_attempts=1)
 async def execute_job(ctx: PluginContext, execution_: JobExecution, payload: dict):
+    stopped, out = await _stoppable(execution_, _execute(ctx, execution_, payload))
+    return await _finish_cancelled(ctx, payload, "execute") if stopped else out
+
+
+async def _execute(ctx: PluginContext, execution_: JobExecution, payload: dict):
     _configure(ctx)
     run = await _load(ctx, payload["run_id"])
     run["job"] = {"id": execution_.id, "name": "palette_video.execute", "started_at": time.time()}
@@ -510,6 +622,7 @@ async def execute_job(ctx: PluginContext, execution_: JobExecution, payload: dic
                 o["storage"] = await ctx.storage.upload_file_path(
                     o["path"], "video/mp4", key=f"renders/{run['id']}/{sid}.mp4")
             await _store_clean(ctx, run["id"], sid, o)
+            await _store_render3d(ctx, run["id"], sid, o)
             await _store_scenes(ctx, run["id"], sid, o)
     await _save(ctx, run)
     return {"run_id": run["id"], "status": run["status"]}
@@ -600,6 +713,11 @@ async def _store_scenes(ctx: PluginContext, run_id: str, sid: str, o: dict) -> N
 @job("palette_video.rerender", timeout_seconds=3600, max_attempts=1)
 async def rerender_job(ctx: PluginContext, execution_: JobExecution, payload: dict):
     """A new take of one scene of a finished film, spliced in (story_engine.rerender_scene)."""
+    stopped, out = await _stoppable(execution_, _rerender(ctx, execution_, payload))
+    return await _finish_cancelled(ctx, payload, "rerender") if stopped else out
+
+
+async def _rerender(ctx: PluginContext, execution_: JobExecution, payload: dict):
     from engines import story_engine
     _configure(ctx)
     run = await _load(ctx, payload["run_id"])
@@ -654,11 +772,176 @@ async def rerender_job(ctx: PluginContext, execution_: JobExecution, payload: di
     return {"run_id": run["id"], "status": run["status"]}
 
 
+# ---------------------------------------------------------------- 3D Render
+
+R3D_TYPES = {".mp4": "video/mp4", ".jpg": "image/jpeg", ".json": "application/json"}
+
+
+def _render3d_output(run: dict, step_id: str) -> tuple[dict, dict]:
+    ex = (run.get("execution") or {}).get(step_id) or {}
+    o = next((o for o in ex.get("outputs") or [] if o.get("render3d")), None)
+    if not o:
+        raise HTTPException(404, "This step has no 3D Render output.")
+    return ex, o
+
+
+def _r3d_files(r: dict) -> dict[str, str]:
+    """Every file of a 3D Render record by kind: the reference and its passes, the realistic video and the rest."""
+    files = {"reference": r.get("reference"), **{k: v for k, v in (r.get("passes") or {}).items() if k != "rgb"},
+             "final": r.get("final"), "comparison": r.get("comparison"), "sheet": r.get("sheet"),
+             "metadata": r.get("metadata")}
+    return {k: v for k, v in files.items() if v}
+
+
+async def _store_render3d(ctx: PluginContext, run_id: str, sid: str, o: dict) -> None:
+    """The 3D reference, every control pass, the metadata and the realistic video into app storage, as related
+    assets of one step (the render folder is scratch space). Best effort per file."""
+    r = o.get("render3d")
+    if not r:
+        return
+    st = r.setdefault("storage", {})
+    for kind, path in _r3d_files(r).items():
+        if kind in st or not Path(path).exists():
+            continue
+        ext = Path(path).suffix.lower()
+        try:
+            st[kind] = await ctx.storage.upload_file_path(path, R3D_TYPES.get(ext, "application/octet-stream"),
+                                                          key=f"renders/{run_id}/{sid}/3d/{kind}-v{len(r.get('retakes') or [])}{ext}")
+        except Exception as e:
+            log.warning("3D Render %s of %s not stored: %s", kind, run_id, e)
+
+
+def _public_render3d(r: dict) -> dict:
+    """The 3D Render record for the browser: no local paths; which media the route serves."""
+    hidden = ("reference", "passes", "metadata", "sheet", "stills", "images", "work", "final", "comparison", "storage")
+    out = {k: v for k, v in r.items() if k not in hidden}
+    have = {k for k, v in _r3d_files(r).items() if Path(v).exists()} | set((r.get("storage") or {}).keys())
+    out["media"] = sorted(have - {"metadata"}) + (["metadata"] if "metadata" in have else [])
+    if isinstance(out.get("validation"), dict):
+        out["validation"] = {**out["validation"], "events": [{k: v for k, v in e.items() if k not in ("ref_still", "out_still")}
+                                                             for e in out["validation"].get("events") or []]}
+    return out
+
+
+@router.get("/runs/{run_id}/render3d/{step_id}/{kind}", dependencies=READ)
+async def render3d_media(run_id: str, step_id: str, kind: str, ctx: PluginContext = Depends(get_plugin_context)):
+    """A 3D Render file: reference, depth, normal, mask_characters, mask_objects, final, comparison, sheet, metadata."""
+    run = await _load(ctx, run_id)
+    _, o = _render3d_output(run, step_id)
+    r = o["render3d"]
+    path = _r3d_files(r).get(kind)
+    if path and Path(path).exists():
+        return FileResponse(path, media_type=R3D_TYPES.get(Path(path).suffix.lower()), filename=f"{run_id}-{kind}{Path(path).suffix}",
+                            headers={"Cache-Control": "private, max-age=600"})
+    url = ((r.get("storage") or {}).get(kind) or {}).get("file_url") or ""
+    local = _local_file(url) if url else None
+    if local:
+        return FileResponse(local, media_type=R3D_TYPES.get(local.suffix.lower()), filename=f"{run_id}-{kind}{local.suffix}")
+    if url and not url.startswith("file://"):
+        return RedirectResponse(url)
+    raise HTTPException(404, f"This 3D Render has no {kind}.")
+
+
+class Realize(BaseModel):
+    instruction: str = Field("", max_length=1000)
+
+
+@router.post("/runs/{run_id}/render3d/{step_id}/realize", dependencies=WRITE)
+async def realize_render3d(run_id: str, step_id: str, body: Realize, ctx: PluginContext = Depends(get_plugin_context)):
+    """The user reviewed the 3D reference: make it realistic (Kling 4.0; Seedance 2.0 only if Kling fails)."""
+    run = await _load(ctx, run_id)
+    if run["status"] != "completed":
+        raise HTTPException(409, "Wait until the 3D reference is finished.")
+    ex, o = _render3d_output(run, step_id)
+    run.update(status="executing", rerender={"step_id": step_id, "realize": True}, cancel_requested=False)
+    ex["message"] = "Making the 3D reference realistic (Kling 4.0)"
+    _event(run, ex["message"] + (f": {body.instruction[:80]}" if body.instruction else ""))
+    run.pop("job", None)
+    await _save(ctx, run)
+    await ctx.jobs.enqueue("palette_video.realize", {"run_id": run_id, "step_id": step_id, "instruction": body.instruction},
+                           idempotency_key=f"realize:{run_id}:{step_id}:{len(run['events'])}")
+    return _public(run)
+
+
+@job("palette_video.realize", timeout_seconds=7200, max_attempts=1)
+async def realize_job(ctx: PluginContext, execution_: JobExecution, payload: dict):
+    """3D Render, second half: the reviewed 3D reference becomes a realistic video (render3d_engine.realize)."""
+    stopped, out = await _stoppable(execution_, _realize(ctx, execution_, payload))
+    return await _finish_cancelled(ctx, payload, "realize") if stopped else out
+
+
+async def _realize(ctx: PluginContext, execution_: JobExecution, payload: dict):
+    from engines import story_engine
+    _configure(ctx)
+    run = await _load(ctx, payload["run_id"])
+    run["job"] = {"id": execution_.id, "name": "palette_video.realize", "started_at": time.time()}
+    sid = payload["step_id"]
+    ex, o = _render3d_output(run, sid)
+    r = o["render3d"]
+    usage = run.setdefault("usage_log", [])
+    paid = run.setdefault("model_calls", [])
+    tokens = (llm.usage_log.set(usage), story_engine.fal_usage.set(paid))
+
+    async def progress(msg: str) -> None:
+        ex["message"] = msg
+        _event(run, msg)
+        await _save(ctx, run)
+    try:
+        if not Path(r.get("reference") or "").exists():  # the render folder is gone: fetch the stored reference
+            url = ((r.get("storage") or {}).get("reference") or {}).get("file_url") or ""
+            if not url:
+                raise RuntimeError("the 3D reference is no longer stored; render the 3D scene again")
+            r["reference"] = str(_local_file(url) or await _materialize(url, config.STORAGE / "renders" / run["id"] / "reference.mp4"))
+        work = config.STORAGE / "renders" / f"{run['id']}-{sid}-realize-{int(time.time())}"
+        new = await render3d_engine.realize(r, work, progress, instruction=payload.get("instruction") or "")
+        for k in ("final", "comparison"):
+            (new.get("storage") or {}).pop(k, None)
+        version = len(o.setdefault("versions", [])) + 1
+        o["versions"].append({"storage": o.get("storage"), "render3d": "reference", "at": time.time()})
+        o["render3d"] = new
+        o["path"], o["ref"] = new["final"], f"file://{new['final']}"
+        o["duration_s"] = round(render3d_engine.renderer.probe(new["final"])["duration"], 2)
+        o["storage"] = await ctx.storage.upload_file_path(new["final"], "video/mp4",
+                                                          key=f"renders/{run['id']}/{sid}-v{version}.mp4")
+        await _store_render3d(ctx, run["id"], sid, o)
+        pv, v = new["provider"], new["validation"]
+        ex["message"] = (f"Realistic video by {pv['label']}" + (" (fallback: Kling failed)" if pv.get("fallback_used") else "")
+                         + f"; comparison with the 3D reference: {v['status']}"
+                         + (f" ({len(v['failed_events'])} event(s) not preserved)" if v.get("failed_events") else "") + ".")
+        run["status"] = "completed"
+        run["report"] = execution.build_report(run)
+        _event(run, ex["message"])
+    except execution.RunDeleted:
+        return {"run_id": run["id"], "status": "deleted"}
+    except execution.RunCancelled:
+        run["status"] = "completed"
+        ex["message"] = "Realistic render cancelled; the 3D reference is unchanged."
+        _event(run, ex["message"])
+    except Exception as e:
+        log.exception("realistic render failed for %s", run["id"])
+        run["status"] = "completed"
+        attempts = getattr(e, "attempts", None)
+        if attempts:
+            r["provider"] = {"attempts": attempts, "model": None, "label": None, "failed": True}
+        if getattr(e, "account", False):
+            r["realize_error"], r["account_error"] = str(e), True
+        ex["message"] = f"The realistic render failed ({str(e)[:300]}); the 3D version is kept - press Make it realistic again after fixing it."
+        _event(run, ex["message"])
+    finally:
+        llm.usage_log.reset(tokens[0])
+        story_engine.fal_usage.reset(tokens[1])
+    run.pop("rerender", None)
+    run["cancel_requested"] = False
+    run["usage"] = llm.usage_summary(run)
+    await _save(ctx, run)
+    return {"run_id": run["id"], "status": run["status"]}
+
+
 # ---------------------------------------------------------------- runs whose job died
 
 _BUSY = ("analyzing", "approved", "executing")
 _JOB_TIMEOUT = {"palette_video.analyze": 1800, "palette_video.execute": 7200, "palette_video.rerender": 3600,
-                "palette_video.text": 3600}
+                "palette_video.text": 3600, "palette_video.realize": 7200}
 _JOB_ENDED = ("completed", "failed", "cancelled", "succeeded", "timed_out", "dead")
 
 
@@ -1066,9 +1349,15 @@ def _story_files(run: dict) -> list[dict]:
 
 
 def _story_prompt(run: dict) -> str:
-    """The user's words, or the topic they picked from the five ideas (stage 1)."""
+    """The user's words, or the topic they picked from the five ideas (stage 1); with an uploaded document that is
+    not for the Document Explainer (an ad, a story, a lesson...), the document as the brief."""
     topic = (run.get("answers") or {}).get(TOPIC_Q)
-    return f"{topic}\n\n(The user's request was: {run['prompt']})" if topic else run["prompt"]
+    words = f"{topic}\n\n(The user's request was: {run['prompt']})" if topic else run["prompt"]
+    route = run.get("doc_route") or {}
+    if route.get("use") == "drama":  # the drama director reads the text itself as its source
+        return words + "\n\nTurn the uploaded document into a short drama."
+    docs = [d for d in (run.get("documents") or {}).values() if d.get("text")]
+    return words + doc_router.brief(route, docs)
 
 
 class PalettePick(BaseModel):
@@ -1119,8 +1408,16 @@ async def cancel_run(run_id: str, ctx: PluginContext = Depends(get_plugin_contex
     run = await _load(ctx, run_id)
     if run["status"] not in BUSY:
         raise HTTPException(409, "Only a run that is analysing or rendering can be cancelled.")
+    if run.get("cancel_requested"):  # pressed again while stopping: nothing new to do or log
+        return _public(run)
     run["cancel_requested"] = True
     _event(run, "Cancel requested")
+    job_id = (run.get("job") or {}).get("id")
+    if job_id:  # the job's watcher sees this within a second and stops it mid-call
+        try:
+            await ctx.jobs.cancel(job_id)
+        except Exception as e:  # the flag below still stops it at its next save point
+            log.info("job cancel for run %s not delivered: %s", run_id, e)
     if not await _job_alive(ctx, run):
         run["status"] = "cancelled"
         for ex in (run.get("execution") or {}).values():
@@ -1449,7 +1746,7 @@ async def rerun(run_id: str, body: Rerun, ctx: PluginContext = Depends(get_plugi
     label = {"analyze": "AI Analyze", "hybrid": "Hybrid", "normal": "Normal", "auto": "Auto", "storyboard": "Storyboard",
              "flow": "Flow Video", "motion": "Motion Video",
              "presenter": "Presenter", "motion3d": "3D Motion Video", "explainer": "Document Explainer",
-             "programmatic": "Programmatic Film", "documentary": "Documentary"}[body.mode]
+             "programmatic": "Programmatic Film", "documentary": "Documentary", "render3d": "3D Render"}[body.mode]
     run = _new_run(old["prompt"], body.mode, str(ctx.user_id), message=f"Think again in {label} mode.",
                    conversation_id=old.get("conversation_id") or old["id"])
     run.update(parent_run=run_id, answers=dict(old.get("answers", {})), settings=dict(old.get("settings") or {}),

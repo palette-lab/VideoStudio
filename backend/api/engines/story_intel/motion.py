@@ -225,6 +225,7 @@ def to_plan(d: dict) -> dict:
             # The words are an editable text layer over the film (text_layer.py), never drawn into the keyframe.
             "in_scene_text": "", "overlay_text": s.get("typography_text") or "", "on_screen_text": "",
             "typography_style": s.get("typography_style") or "",
+            "events": s.get("events") or [],  # the temporal sequence ids this beat shows
             "prompt": {"subject": s.get("hero_subject") or "", "environment": s.get("composition") or "",
                        "action": " ".join(x for x in (m.get("hero_object_motion"), m.get("three_d_animation")) if x),
                        "interaction": m.get("graphic_motion") or "", "emotion": s.get("visual_concept") or "",

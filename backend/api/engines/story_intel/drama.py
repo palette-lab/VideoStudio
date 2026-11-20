@@ -51,7 +51,16 @@ WORK IN THIS ORDER
    - Scene titles in dialogue scenes name the speaker ("Mira: You knew?").
 
 SHORT-DRAMA CRAFT
-- Hook within the first 3 seconds: a confrontation, a secret, a slap, a shocking line.
+- Hook within the first 3 seconds: a confrontation, a secret, a slap, a shocking line. The hook may be the
+  arrival itself (the door swings open on the person who insulted them, and the first line lands as they step in):
+  never skip HOW the characters got there.
+- FLOW AND GEOGRAPHY: the viewer always knows where everyone is and how they got there. Open a new place with an
+  arrival shot (the courier walks the corridor, knocks, pushes the door open, takes in the room); a character who
+  leaves walks out on screen. Between dialogue close-ups, keep the geography with an over-the-shoulder or a wider
+  two-shot every few lines, and let the action shots move with the character (tracking, following) rather than
+  only static reverse cuts. Each scene's start_state is exactly the previous scene's end_state.
+- Keep each scene's fields compact (the prompt fields one or two sentences each): the whole episode must fit, and
+  every scene the structure names must be written to the cliffhanger.
 - Conflict in every scene: someone wants something and someone stands in the way. Status flips (the humiliated
   one turns the tables); one clear reversal in the middle of the episode.
 - End on a CLIFFHANGER (a reveal, a threat, an arrival, a question) unless this is the series' final episode -

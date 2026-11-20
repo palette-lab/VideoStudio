@@ -25,7 +25,7 @@ import time
 
 from router_core import config, llm
 
-from .. import lang as lang_
+from .. import flow_budget, lang as lang_, temporal
 from . import agents, documentary, drama, motion, research as research_, validate as validate_
 
 log = logging.getLogger("palette_video.story_intel")
@@ -58,6 +58,7 @@ async def classify(prompt: str, files: list[dict], duration_s=None, aspect_ratio
         out["category"] = "other"
     if duration_s:  # the user's length wins
         out["duration_s"] = int(duration_s)
+    out["duration_given"] = bool(duration_s)
     out["language"] = lang_.detect(prompt, out.get("language"))  # the user's language, never a mix
     try:
         out["duration_s"] = max(10, min(120, int(out.get("duration_s") or 45)))
@@ -92,7 +93,8 @@ async def do_research(cls: dict, prompt: str, documents: list[dict]) -> dict | N
 def _architect_user(prompt: str, cls: dict, res: dict | None, files: list[dict], aspect_ratio) -> str:
     parts = [f"REQUEST (the user's words win):\n{prompt.strip()}",
              f"UNDERSTANDING: {json.dumps({k: cls.get(k) for k in ('category', 'intent', 'subject', 'central_idea', 'audience', 'story_type', 'tone', 'visual_style', 'language', 'assumptions')}, ensure_ascii=False)}",
-             f"LENGTH: {cls['duration_s']} seconds. FORMAT: {aspect_ratio or 'not set'}.",
+             f"LENGTH: {cls['duration_s']} seconds. FORMAT: {aspect_ratio or 'not set'}."
+             + flow_budget.flow_budget(cls["duration_s"]),
              f"UPLOADED FILES: {_files_note(files)} (uploaded people and products are the real ones: keep their exact "
              "look; refer to them as 'the person / product from the uploaded photo')."]
     parts.append(lang_.rule(cls.get("language") or "english").strip())
@@ -142,7 +144,8 @@ async def architect(prompt: str, cls: dict, res: dict | None, files: list[dict],
     msgs = [{"role": "system", "content": system},
             {"role": "user", "content": _architect_user(prompt, cls, res, files, aspect_ratio)
              + ("\n\n" + documentary.archive_note(archive) if doc and archive else "")
-             + ("\n\n" + source if source else "")}]
+             + ("\n\n" + source if source else "")
+             + temporal.writer_block(cls.get("_events") or {}, cls.get("_pace"))}]
     revising = bool(feedback and previous)
     if revising:
         msgs += _fix_msgs(feedback, previous)
@@ -151,11 +154,71 @@ async def architect(prompt: str, cls: dict, res: dict | None, files: list[dict],
     plan = await _json(msgs, stage, 32000)  # a revise rewrites much of the plan: same room as the first draft
     if revising:
         plan = merge_patch(previous, plan)
-    scenes = [s for s in plan.get("scenes") or [] if isinstance(s, dict)]
-    for n, s in enumerate(scenes, start=1):
+    plan["scenes"] = [s for s in plan.get("scenes") or [] if isinstance(s, dict)]
+    await continue_scenes(msgs, plan, stage)
+    for n, s in enumerate(plan["scenes"], start=1):
         s["n"] = n
-    plan["scenes"] = scenes
     return plan
+
+
+# A long episode used up the whole answer: the delivery-boy drama planned 19 scenes and stopped in the middle of
+# scene 11 (both the draft and the revision), and the film was made without its climax and ending. The writer is
+# asked to go on from where it stopped until the planned scenes are all written.
+CONTINUE_ROUNDS = 3
+CONTINUE = """Your plan was cut off: scenes 1-{K} are written (the last ones are shown above{CUT}). Write ONLY the
+remaining scenes, {START} to {END}, in full, with exactly the same fields as the scenes above, to the story's planned
+ending ({ENDING}). Scene {START}'s start_state continues scene {K}'s end_state. Keep every field compact.
+Return ONLY JSON {{"scenes": [...]}}."""
+
+
+def planned_scene_count(plan: dict) -> int:
+    """The last scene number the plan's own structure names (0 when it names none)."""
+    nums = []
+    for st in plan.get("structure") or []:
+        for x in (st.get("scenes") if isinstance(st, dict) else None) or []:
+            try:
+                nums.append(int(x))
+            except (TypeError, ValueError):
+                pass
+    return max(nums, default=0)
+
+
+def cut_off(scene: dict) -> bool:
+    """A scene the answer stopped in the middle of (no end state, or a prompt without its ending)."""
+    pr = scene.get("prompt")
+    return not scene.get("end_state") or (isinstance(pr, dict) and bool(pr) and not pr.get("ending"))
+
+
+async def continue_scenes(msgs: list[dict], plan: dict, stage: str) -> None:
+    """Fill in the scenes a cut-off answer is missing (in place); best effort - a failure keeps what is written."""
+    for _ in range(CONTINUE_ROUNDS):
+        scenes = plan["scenes"]
+        if not scenes:
+            return
+        last_cut = cut_off(scenes[-1])
+        want = planned_scene_count(plan)
+        if len(scenes) >= want and not last_cut:
+            return
+        keep = scenes[:-1] if last_cut else scenes
+        start = len(keep) + 1
+        shown = {k: v for k, v in plan.items() if k not in ("scenes", "script")}
+        shown["scenes"] = keep[-2:]
+        ask = (CONTINUE.replace("{K}", str(len(keep))).replace("{START}", str(start))
+               .replace("{END}", str(max(want, start)) if want else "the end of the story")
+               .replace("{CUT}", f"; scene {start} was cut off, write it again" if last_cut else "")
+               .replace("{ENDING}", str(plan.get("cliffhanger") or "the climax, the resolution and the last beat")[:300])
+               .replace("{{", "{").replace("}}", "}"))
+        try:
+            more = await _json(msgs + [{"role": "assistant", "content": json.dumps(shown, ensure_ascii=False)[:40000]},
+                                       {"role": "user", "content": ask}], stage + ".continue", 32000)
+        except llm.LLMError as e:
+            log.warning("continuing the cut-off plan failed: %s", e)
+            return
+        new = [x for x in more.get("scenes") or [] if isinstance(x, dict)]
+        if not new:
+            return
+        log.info("plan was cut off after scene %s; %s more scene(s) written", len(keep), len(new))
+        plan["scenes"] = keep + new
 
 
 async def solve_puzzle(plan: dict) -> dict | None:
@@ -179,6 +242,8 @@ async def review(prompt: str, cls: dict, plan: dict, res: dict | None, doc: bool
         rules += documentary.lint(plan, {p["id"] for p in cls.get("_archive") or []})
     if drama.applies(cls):
         rules += drama.lint(plan)
+    seq_rules, seq_notes = temporal.plan_issues(cls.get("_events") or {}, plan.get("scenes") or [])
+    rules += seq_rules
     solver = await solve_puzzle(plan) if cls.get("category") == "puzzle_mystery" else None
     body = {"request": prompt, "category": cls.get("category"), "plan": plan,
             "research": {k: (res or {}).get(k) for k in ("facts", "timeline", "conflicts", "note")} if res else None,
@@ -191,7 +256,7 @@ async def review(prompt: str, cls: dict, plan: dict, res: dict | None, doc: bool
     except llm.LLMError as e:
         log.warning("story review failed: %s", e)
         llm_review = {"score": None, "pass": True, "issues": [], "error": str(e)[:200]}
-    issues = [i for i in llm_review.get("issues") or [] if isinstance(i, dict) and i.get("problem")]
+    issues = [i for i in llm_review.get("issues") or [] if isinstance(i, dict) and i.get("problem")] + seq_notes
     try:
         score = int(llm_review.get("score")) if llm_review.get("score") is not None else None
     except (TypeError, ValueError):
@@ -272,6 +337,7 @@ async def develop(prompt: str, files: list[dict] | None = None, documents: list[
         await _maybe(say, "Cinematic documentary director: research, script, one world and one camera, scene by scene")
     else:
         await _maybe(say, f"Story: writing the {cls['category'].replace('_', ' ')} and directing each scene")
+    await _sequence(prompt, cls, files, say)
     plan = await architect(prompt, cls, res, files, aspect_ratio, doc=doc)
     await _maybe(say, "Story: validating the story, facts and scenes")
     rev = await review(prompt, cls, plan, res, doc)
@@ -286,7 +352,29 @@ async def develop(prompt: str, files: list[dict] | None = None, documents: list[
         except llm.LLMError as e:
             log.warning("story revision failed: %s", e)
     intel.update(plan=plan, validation=rev, seconds=round(time.time() - t0, 1))
+    _keep_sequence(intel, cls)
     return intel
+
+
+async def _sequence(prompt: str, cls: dict, files: list[dict], say, source: str = "") -> None:
+    """Temporal intelligence before any scene is written: every event, in order, and the length they need."""
+    await _maybe(say, "Story: mapping every event in order (what happens first, what happens next)")
+    g = await temporal.extract(prompt, cls, source, _files_note(files))
+    if not g.get("events"):
+        return
+    info = temporal.pacing.pace(g, cls.get("duration_s"), bool(cls.get("duration_given")))
+    if not info["fixed"]:
+        cls["duration_s"] = info["total_s"]  # auto length: the time the events need
+    cls["_events"], cls["_pace"] = g, info
+    await _maybe(say, f"Story: {len(g['events'])} events mapped; {info['note']}")
+
+
+def _keep_sequence(intel: dict, cls: dict) -> None:
+    """The sequence record on the plan (graph, pacing, coverage, each scene's continuity); the working copies leave
+    the classification."""
+    g, info = cls.pop("_events", None), cls.pop("_pace", None)
+    if g and g.get("events") and (intel.get("plan") or {}).get("scenes") is not None:
+        intel["temporal"] = temporal.annotate(g, intel["plan"]["scenes"], info)
 
 
 async def _develop_drama(intel: dict, prompt: str, cls: dict, documents: list[dict], files: list[dict], aspect_ratio,
@@ -301,6 +389,7 @@ async def _develop_drama(intel: dict, prompt: str, cls: dict, documents: list[di
     source = "\n\n".join(x for x in (drama.series_note(series, n) if series else "",
                                        drama.source_note(documents)) if x)
     what = f"episode {n} of {series.get('title') or 'the series'}" if series else "the episode"
+    await _sequence(prompt, cls, files, say, source)
     await _maybe(say, f"Short drama director: writing {what} - script, cast, then one shot per line")
     plan = await architect(prompt, cls, None, files, aspect_ratio, source=source)
     await _maybe(say, "Short drama director: checking the hook, the dialogue shots and the cliffhanger")
@@ -321,6 +410,7 @@ async def _develop_drama(intel: dict, prompt: str, cls: dict, documents: list[di
     plan["voices"] = drama.voices(plan, cls.get("language") or "english")
     intel["series"] = drama.remember_series(plan, series)
     intel.update(plan=plan, validation=rev, seconds=round(time.time() - t0, 1))
+    _keep_sequence(intel, cls)
     return intel
 
 
@@ -374,7 +464,9 @@ async def _develop_motion(intel: dict, prompt: str, cls: dict, res: dict | None,
     intel["mode"] = "motion_graphics"
     aspect_ratio = aspect_ratio or "9:16"  # the playbook: strictly 9:16 unless the user picked another format
     intel["aspect_ratio"] = aspect_ratio
+    await _sequence(prompt, cls, files, say)
     await _maybe(say, "Motion graphics director: script, palette, keyframes and motion")
+    prompt = prompt + temporal.writer_block(cls.get("_events") or {}, cls.get("_pace"))
     raw = await _direct(prompt, cls, res, files, aspect_ratio)
     if raw.get("needs_topic") or cls.get("has_topic") is False:
         ideas = [str(x).strip() for x in raw.get("topic_ideas") or [] if str(x).strip()][:5]
@@ -396,6 +488,7 @@ async def _develop_motion(intel: dict, prompt: str, cls: dict, res: dict | None,
         except llm.LLMError as e:
             log.warning("motion revision failed: %s", e)
     intel.update(plan=plan, validation=rev, seconds=round(time.time() - t0, 1))
+    _keep_sequence(intel, cls)
     return intel
 
 
@@ -450,7 +543,8 @@ async def regenerate_scene(intel: dict, n: int, instruction: str = "") -> dict:
     ctx = {"title": plan.get("title"), "story_concept": plan.get("story_concept"), "bible": plan.get("bible"),
            "style": plan.get("style"), "previous_scene": scenes[n - 2] if n > 1 else None,
            "scene_to_rewrite": scenes[n - 1], "next_scene": scenes[n] if n < len(scenes) else None,
-           "instruction": instruction or "make this scene stronger: a clearer event, more specific action and prompt"}
+           "instruction": instruction or "make this scene stronger: a clearer event, more specific action and prompt",
+           "events_this_scene_must_show": temporal.scene_events_text(intel.get("temporal") or {}, n) or None}
     new = await _json([{"role": "system", "content": agents.SCENE_REGEN},
                        {"role": "user", "content": json.dumps(ctx, ensure_ascii=False)[:40000]}],
                       "story.scene_regenerate", 8000)
@@ -499,6 +593,10 @@ def _relint(intel: dict) -> None:
         v["rules"] += documentary.lint(intel["plan"], {p["id"] for p in intel.get("archive") or []})
     if intel.get("mode") == "short_drama":
         v["rules"] += drama.lint(intel["plan"])
+    record = intel.get("temporal") or {}
+    if record.get("graph"):  # the sequence after the user's edit: still every event, still in order?
+        v["rules"] += temporal.plan_issues(record["graph"], intel["plan"].get("scenes") or [])[0]
+        intel["temporal"] = temporal.annotate(record["graph"], intel["plan"].get("scenes") or [], record.get("pacing"))
     v["edited_at"] = time.time()
 
 

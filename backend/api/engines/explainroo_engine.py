@@ -471,6 +471,8 @@ def wanted(run: dict) -> bool:
         from .story_intel import drama
         if drama.asks_for_drama(run.get("prompt") or ""):
             return False
+        if (run.get("doc_route") or {}).get("use") not in (None, "explain"):
+            return False  # its content is an ad, a story, a lesson...: the matching film makes it (doc_router)
     return mode == "auto" and has_doc and not footage and not run.get("parent_run")
 
 

@@ -119,6 +119,11 @@ STORY RULES
   pan to somewhere else, a time change (day to sunset) or a new location is a new scene.
 - Cause and effect: each scene's start_state continues the previous scene's end_state (same characters, objects,
   positions, light), unless transition_in names a cut, a time jump or a new place.
+- Flow, never teleporting: when a character comes into a place or leaves it, SHOW the move - walking up the
+  corridor, knocking, pushing the door open, stepping in and seeing who is there, or leaving through the door -
+  instead of cutting to them already inside. A new place is entered on screen (its door, its threshold, the first
+  look around) before the talk starts there. Movement shots follow the character (tracking from behind, or
+  leading them) in one continuous move.
 - Fiction and fables: original, emotionally engaging, internally consistent; a fable's moral is SHOWN in action
   and said once at the end. Puzzles: the rules, every clue the answer needs, a fair order, a moment for the viewer
   to think, then the reveal and the reasoning; the solution must follow from the clues and be unique. Facts: use
@@ -184,6 +189,8 @@ STORY: does it make sense, is the opening engaging, is the conflict clear, is th
 satisfying, does it match the user's request and category?
 SCENES: does every scene advance the story (no repeated or camera-only scenes)? are actions complete and
 filmable in one 3-10 s clip (one place, one time, at most 3 beats)? are transitions logical? durations reasonable?
+FLOW: does every character who arrives or leaves do it on screen (walk in, open the door, step through) instead of
+jumping into the next place already there? is the scene list complete to the planned ending (no missing scenes)?
 CONTINUITY: characters, sizes, objects, locations consistent; each scene continues from the previous end_state?
 FACTS: is every factual statement in the narration supported by the research / fact_notes? uncertain claims
 marked? PUZZLE: does the solution follow uniquely from the clues (compare with the independent solver's answer)?

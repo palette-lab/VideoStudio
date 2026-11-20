@@ -107,6 +107,12 @@ def lint(plan: dict, target_s: int | None = None, category: str = "") -> list[di
                 not (_words(a.get("end_state")) & _words(b.get("start_state"))):
             add(i + 1, "continuity", f"scene {i + 1} does not start where scene {i} ended",
                 "continue from the previous end_state or name the cut / time jump in transition_in")
+    from .. import flow_budget
+    for n in flow_budget.teleports(scenes, target_s or total):
+        add(n, "continuity", f"scene {n} jumps to a new place with no way in shown (no walk, door, stairs or arrival)",
+            f"show the move: end scene {n - 1} with the character leaving or heading there, or open scene {n} with "
+            "them arriving (walking in, opening the door, coming up the stairs); add a 3-5 s movement shot if the "
+            "length allows")
     if target_s and total and abs(total - target_s) > max(6, target_s * 0.2):
         add(None, "scenes", f"the scenes add up to {total:g} s for a {target_s} s film", "fit the durations")
     # documentaries: story time only moves forward after the opening (make_beats.py)

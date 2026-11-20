@@ -81,7 +81,7 @@ def test_the_check_compares_the_place_too(monkeypatch):
     monkeypatch.setattr(se.llm, "chat_json", fake)
     diffs = asyncio.run(se.consistency_issues(["p", "f"], "still", {"bible": {}}, "plate"))
     assert seen["images"] == ["p", "f", "plate", "still"] and "LOCATION PLATE" in seen["text"]
-    assert diffs == ["the walls are cream instead of slanted blue"]
+    assert diffs == ["MINOR: the walls are cream instead of slanted blue"]
     asyncio.run(se.consistency_issues(["p"], "still", {"bible": {}}))
     assert "LOCATION PLATE" not in seen["text"] and seen["images"] == ["p", "still"]
 

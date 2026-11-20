@@ -1,0 +1,56 @@
+{
+  "app_id": "render3d-realistic-video",
+  "name": "3D Render",
+  "description": "3D to realistic video: the story is understood as an ordered list of events, planned as a real 3D scene (rigged humanoids and animals, props, rooms, vehicles, products, lights) and animated on one timeline in Three.js, filmed with planned camera moves (follow, dolly, orbit, crane, arc, track, vertigo), rendered as a frame-aligned 3D reference video with depth, normal, character-mask and object-mask passes plus camera and pose metadata, checked, then turned into photoreal cinematic footage by Kling 4.0 video-to-video (Seedance 2.0 reference-to-video only when Kling fails) and compared frame by frame with the 3D reference.",
+  "status": "available",
+  "verified": false,
+  "execution": {
+    "adapter": "engine",
+    "service_target": "engines/render3d_engine.py (Three.js renderer in tools/render3d)"
+  },
+  "source": {
+    "repo": "VideoStudio (own code); camera moves after phantomfjh/camsketch (MIT)",
+    "license": "MIT (tools/render3d), three.js MIT",
+    "version": "1.0.0",
+    "runtime": "node tools/render3d/render.mjs"
+  },
+  "capabilities": [
+    "render3d.photoreal_from_3d"
+  ],
+  "capability_status": {
+    "render3d.photoreal_from_3d": "confirmed",
+    "video.text_to_video": "unknown",
+    "story.character_consistency": "unknown"
+  },
+  "input_modalities": [
+    "text",
+    "image"
+  ],
+  "input_modalities_status": "confirmed",
+  "capability_requirements": {},
+  "accepts_handoff": [],
+  "emits": [
+    "video_file"
+  ],
+  "best_for": [
+    "stories whose exact actions, order and positions matter (someone enters, opens, walks, sits; an animal runs, jumps, meets another)",
+    "precise camera moves that text prompts cannot reliably produce (follow, orbit, crane, dolly zoom)",
+    "product 360-degree turntables and exploded views that must stay geometrically correct",
+    "reviewing the staging as a 3D draft before paying for the realistic render"
+  ],
+  "not_good_for": [
+    "lip-synced dialogue or a talking presenter (use Presenter)",
+    "films longer than 30 seconds in one take (the video-to-video model takes at most 30 s)",
+    "editing the user's own footage"
+  ],
+  "fallback_apps": [],
+  "profile": {
+    "shot_structures": {"value": ["single_continuous", "multi_scene"], "status": "confirmed"},
+    "max_duration_s": {"value": 30, "status": "confirmed"},
+    "aspect_ratios": {"value": ["16:9", "9:16", "1:1"], "status": "confirmed"},
+    "motion_styles": {"value": ["realistic", "programmatic_precise"], "status": "confirmed"},
+    "accepts_asset_roles": {"value": ["character", "product"], "status": "unverified"},
+    "audio_output": {"value": ["native_clip_audio"], "status": "unverified"}
+  },
+  "profile_notes": "Added 2026-11-20. Primary transformation: fal kling/v4/video-to-video/edit (source 3-30 s, at least 700 px on each side, 24-60 fps; checked against fal's OpenAPI schema 2026-11-20). Fallback: fal bytedance/seedance-2.0/reference-to-video with the reference as video_urls (2-15 s per call, 640x640 to 834x1112 pixels). Depth, normal and mask passes are rendered and stored but NOT sent: neither endpoint accepts control videos."
+}

@@ -85,7 +85,7 @@ def test_develop_writes_script_cast_and_shots(monkeypatch):
     monkeypatch.setattr(story_intel.llm, "chat_json", fake)
     intel = asyncio.run(story_intel.develop("make a short drama from this novel", [],
                                             [{"filename": "novel.txt", "text": "Mira married the wrong twin."}]))
-    assert calls == ["story.classify", "story.drama", "story.validate"]  # no research: the novel is the source
+    assert calls == ["story.classify", "story.events", "story.drama", "story.validate"]  # no research: the novel is the source
     assert intel["mode"] == "short_drama" and intel["aspect_ratio"] == "9:16"
     assert intel["plan"]["voices"]["Leo"]["gender"] == "male"
     assert intel["series"]["title"] == "Twin Vows" and len(intel["series"]["episodes"]) == 2

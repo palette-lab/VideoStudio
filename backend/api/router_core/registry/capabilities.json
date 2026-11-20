@@ -24,5 +24,6 @@
   "presenter.talking_head": "A person talking to camera with lip-synced speech (YouTube explainer, UGC ad, testimonial, spokesperson), from a photo of the presenter or a generated one, speaking a written script or the user's own recording.",
   "explainer.from_document": "Read uploaded documents (PDF, Word, TXT, Markdown), analyse them and make a narrated explainer video of their content: diagrams, charts of their real numbers, lists and steps drawn on the spoken words.",
   "programmatic.styled_film": "A whole narrated film drawn in code (no footage or AI video) in a distinct graphic look - chalkboard, whiteboard, blueprint, ink wash, paper pop-up, pixel RPG, newsreel, map explainer, data story, isometric infographic, risograph or Swiss motion - with sound effects and music.",
-  "documentary.editorial_film": "A narrated VOX-style editorial documentary (1-20 minutes) made from paper-collage illustrations animated in code layer by layer - no footage or AI video."
+  "documentary.editorial_film": "A narrated VOX-style editorial documentary (1-20 minutes) made from paper-collage illustrations animated in code layer by layer - no footage or AI video.",
+  "render3d.photoreal_from_3d": "Build the story as a real animated 3D scene (rigged characters, props, camera moves), render a frame-aligned 3D reference video with depth, normal and segmentation passes, then turn that reference into photoreal cinematic footage with a video-to-video model (Kling 4.0 first, Seedance 2.0 only if Kling fails) and check the result against the reference."
 }

@@ -1,0 +1,12 @@
+{
+  "name": "videostudio-render3d",
+  "private": true,
+  "version": "1.0.0",
+  "description": "VideoStudio 3D Render agent: a deterministic Three.js scene renderer (RGB + depth + normal + masks + metadata) driven by a JSON scene spec.",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "playwright-core": "1.48.2",
+    "three": "0.170.0"
+  }
+}

@@ -21,8 +21,8 @@ import httpx
 
 from router_core import config, llm
 
-from . import approaches, effects_engine, finishing, food, genres, motion_design, music, planners
-from .vendor.flow import fal_helper, model_skills, video_merge
+from . import approaches, effects_engine, finishing, flow_budget, food, genres, motion_design, music, planners, temporal
+from .vendor.flow import errors as _errors, fal_helper, model_skills, video_merge
 
 log = logging.getLogger("palette_video.engines")
 
@@ -78,8 +78,24 @@ def quality(story_mode: str | None = None, engine: str | None = None) -> dict:
 
 
 def clip_models(q: dict) -> list[str]:
-    """The clip model, then its fallbacks (no repeats)."""
-    return list(dict.fromkeys([q["video_model"], *q.get("fallbacks", [])]))
+    """The clip model, then its fallbacks (no repeats). With photoreal people (`_no_seedance`) Seedance goes last: it
+    refuses frames that may show a real person, so every clip was paid for twice (Seedance, then Kling)."""
+    models = list(dict.fromkeys([q["video_model"], *q.get("fallbacks", [])]))
+    if q.get("_no_seedance"):
+        models = [m for m in models if not m.startswith("seedance")] + [m for m in models if m.startswith("seedance")]
+    return models
+
+
+_STYLISED = re.compile(r"anim|cartoon|pixar|disney|\b3d\b|cgi|clay|anime|manga|illustrat|styli[sz]ed|toon|painted|"
+                       r"watercolou?r|sketch|comic|low[- ]poly|vector|chibi|storybook", re.I)
+_HUMAN = re.compile(r"\b(male|female|man|woman|boy|girl|person|\d{1,2}[- ]?(year|yr)s?[- ]old|aged? \d{1,2})\b", re.I)
+
+
+def photoreal_people(p: dict, cast: list[dict]) -> bool:
+    """A film whose drawn characters are realistic-looking people (Seedance refuses those frames as real people)."""
+    if _STYLISED.search(art_style(p)) or _STYLISED.search(str(p.get("master_prompt") or "")):
+        return False
+    return any(c.get("photo") or _HUMAN.search(str(c.get("desc") or "")) for c in cast)
 
 
 def clip_resolution(model: str, q: dict) -> str | None:
@@ -310,6 +326,10 @@ async def plan(app_id: str, handoff: dict, refs: list[dict], q: dict, feedback: 
         data = await llm.chat_json(config.REASONING_MODEL, msgs, max_tokens=24000, stage=f"engine.plan.{app_id}")
         scenes = [s for s in (data.get("scenes") or []) if isinstance(s, dict) and str(s.get("image_prompt") or "").strip()]
         missing = _missing_story_fields(scenes)
+        if story_scenes and scenes and len(scenes) < min(n_max, len(story_scenes)):
+            # the approved story is rendered whole: a planner that merged or dropped scenes is asked again
+            missing = (f"{min(n_max, len(story_scenes))} approved scenes but only {len(scenes)} came back - one "
+                       "scene object per approved scene, in order, none merged or dropped")
         if scenes and not missing:
             break
         if attempt == 0:
@@ -323,6 +343,15 @@ async def plan(app_id: str, handoff: dict, refs: list[dict], q: dict, feedback: 
     if not scenes:
         raise EngineError("The planner returned no usable scenes.")
     scenes = [_flat(s) for s in scenes[:n_max]]
+    dropped = max(0, len(story_scenes) - len(scenes)) if story_scenes else 0
+    if dropped:  # said, never silent: the quality's scene limit cut the approved story
+        log.warning("%s approved scenes do not fit the %s-scene limit: the last %s are not rendered",
+                    len(story_scenes), n_max, dropped)
+    seq = (story or {}).get("temporal") or {}
+    for n, (s, st) in enumerate(zip(scenes, story_scenes), start=1):
+        _sequence_fields(s, seq, n)
+        if st.get("environment") and not s.get("environment"):  # where it happens: decides the frame handoff
+            s["environment"] = str(st["environment"])[:300]
     for s, st in zip(scenes, story_scenes):  # words drawn INTO a frame (older 3D plans), so the AI checks spell them
         if st.get("in_scene_text"):
             s["in_scene_text"] = st["in_scene_text"]
@@ -345,6 +374,7 @@ async def plan(app_id: str, handoff: dict, refs: list[dict], q: dict, feedback: 
     return {"title": data.get("title") or "", "story": data.get("story") or "", "bible": data.get("bible") or {},
             "continuity": data.get("continuity") or {}, "master_prompt": str(data.get("master_prompt") or ""),
             "scenes": scenes, "total": sum(durations), "requested_total": want,
+            "dropped_scenes": dropped,
             "music": str(data.get("music") or "")[:300],
             "recipe": recipe if cooking else None, "n_max": n_max,
             "genre": genre, "genre_label": genres.GENRES[genre]["label"],
@@ -431,7 +461,7 @@ CRITIC_PASS = 75
 
 
 CONSISTENCY = """The first {K} image(s) are the film's character references: for each character a passport-style
-face portrait, a full-body front view and a full-body back view. The LAST image is a frame from the film.
+face portrait and a full-body front view. The LAST image is a frame from the film.
 For every character from the references who appears in the frame, list what a viewer would notice is wrong:
 - the face: missing, blank, smeared, melted, half-drawn, cut off by the frame edge when the character is the subject,
   hidden without reason, extra or missing eyes / nose / mouth, or a DIFFERENT face (shape, eyes, nose, mouth,
@@ -441,8 +471,9 @@ For every character from the references who appears in the frame, list what a vi
   size, colour or markings;
 - a character duplicated, or a referenced character merged with someone else.
 Ignore pose, expression, framing, lighting and background. Story bible: {BIBLE}
-Return JSON {"same": true|false, "differences": ["the girl's face is blank -> draw her full face as in the portrait",
-"her hair is short instead of the long braid", ...]}."""
+{SEVERITY}
+Return JSON {"same": true|false, "differences": ["MAJOR: the girl's face is blank -> draw her full face as in the
+portrait", "MINOR: her bracelet is missing", ...]}."""
 
 
 IDENTITY = """Image 1 is a photo of a real person the user uploaded: the person who must appear in the film.
@@ -471,10 +502,46 @@ List only what a viewer would notice is WRONG in image 1:
   fingers, a body that changed;
 - a collage or split image, text, labels or watermarks that were not asked for; when the scene names 3D words that
   must appear: a missing word, a misspelled or garbled letter, extra letters or words.
-Ignore small differences in framing, light and background details. Do not invent problems.
-Return ONLY JSON {"ok": true|false, "issues": ["two plates on the counter but the scene has none yet -> remove the
-plates", ...]} with each issue as "what is wrong -> how to fix it"."""
+Ignore small differences in framing, light and background details. Do not invent problems.{SEVERITY}
+Return ONLY JSON {"ok": true|false, "issues": ["MAJOR: two plates on the counter but the scene has none yet -> remove
+the plates", ...]} with each issue as "MAJOR|MINOR: what is wrong -> how to fix it"."""
 QA_MAX_ISSUES = 6
+
+# Every check tags its issues: only a MAJOR one costs a redraw or a new take. On one film, 38 of 73 images and most of
+# the clip retakes went to coin counts, a bracelet or which hand holds a glass, while the face drift stayed.
+SEVERITY = ("\nStart every issue with MAJOR: or MINOR:. MAJOR = a viewer notices it at once and it breaks the film: "
+            "another face or person, different hair, a different outfit or garment, a blank, smeared or cut-off face, a "
+            "missing or extra person, limb or animal, a different place from the location plate, the wrong moment of the "
+            "action, a collage or split image, "
+            "required text garbled, something morphing. MINOR = everything else: how many small props there are "
+            "(coins, cups, stones), which hand holds something, a small accessory or jewellery, a slightly different "
+            "shade, a detail too small to see at this size.")
+_SEV_TAG = re.compile(r"^\W*(major|minor)\W*\s*[:\-\u2013\u2014]\s*", re.I)
+
+
+def tag_issue(text: str, default_major: bool | None = None) -> str:
+    """An issue as "MAJOR: ..." or "MINOR: ...". Untagged: `default_major`, or (None) a face / hair / outfit word."""
+    text = str(text).strip()
+    m = _SEV_TAG.match(text)
+    if m:
+        return f"{m.group(1).upper()}: {text[m.end():].strip()}"
+    major = bool(MAJOR_DRIFT.search(text)) if default_major is None else default_major
+    return f"{'MAJOR' if major else 'MINOR'}: {text}"
+
+
+def is_major(issue: str) -> bool:
+    m = _SEV_TAG.match(str(issue))
+    return m.group(1).lower() == "major" if m else bool(MAJOR_DRIFT.search(str(issue)))
+
+
+def plain(issue: str) -> str:
+    """The issue without its MAJOR / MINOR tag (for progress lines)."""
+    return _SEV_TAG.sub("", str(issue), count=1)
+
+
+def severity_score(issues: list[str]) -> tuple[int, int]:
+    """(major, total): fewer MAJOR problems always wins."""
+    return sum(1 for x in issues if is_major(x)), len(issues)
 
 
 def _qa_spec(s: dict, which: str) -> str:
@@ -523,7 +590,8 @@ async def scene_issues(image_url: str, s: dict, which: str = "first", prev_url: 
     adds or forgets: extra plates and bowls, a second bottle, the end result drawn in the first frame, extra hands."""
     prev = ("\nImage 2 is the frame just before it in the film (the previous frame of this scene or the previous "
             "scene's last frame): objects that continue must look the same.") if prev_url else ""
-    text = (SCENE_QA.replace("{PREV}", prev).replace("{WHICH}", which).replace("{SPEC}", _qa_spec(s, which))
+    text = (SCENE_QA.replace("{SEVERITY}", SEVERITY).replace("{PREV}", prev).replace("{WHICH}", which)
+            .replace("{SPEC}", _qa_spec(s, which))
             .replace("{PREVCHK}", " compared with image 2" if prev_url else "")
             .replace("{MOMENT}", "the moment the action BEGINS (its start state)" if which == "first"
                      else "the moment the action is COMPLETE (its end state)"))
@@ -538,7 +606,7 @@ async def scene_issues(image_url: str, s: dict, which: str = "first", prev_url: 
     data = await _qa_json(parts, "engine.scene_qa", s)
     if data is None:
         return []
-    issues = [str(x) for x in (data.get("issues") or []) if str(x).strip()]
+    issues = [tag_issue(x, default_major=True) for x in (data.get("issues") or []) if str(x).strip()]
     return [] if data.get("ok") is True and not issues else issues[:QA_MAX_ISSUES]
 
 
@@ -558,11 +626,11 @@ List only clear problems a viewer would notice:
 - broken physics or anatomy: things floating, passing through each other, extra or fused fingers, limbs bending
   wrongly; a lid that does not fit its pot or rests on the food, a seal not on the rim, objects the wrong size;
 - text: 3D letters or words that morph, melt, re-spell, flicker or become unreadable during the clip.{PRODUCT}{CAST}
-Ignore normal motion, light flicker, camera movement that the scene asks for, and small blur.
-Return ONLY JSON {"ok": true|false, "issues": ["what is wrong and when (frame N) -> how to fix it in the next
-take", ...]}."""
+Ignore normal motion, light flicker, camera movement that the scene asks for, and small blur.{SEVERITY}
+Return ONLY JSON {"ok": true|false, "issues": ["MAJOR|MINOR: what is wrong and when (frame N) -> how to fix it in the
+next take", ...]}."""
 CLIP_QA_FRAMES = 6
-CLIP_RETAKES = 2  # new takes of a clip the check finds problems in (face / hair / outfit drift, morphing, ...)
+CLIP_RETAKES = 1  # one new take, and only for a MAJOR problem (face / hair / outfit drift, morphing, a jump)
 
 
 def _clip_frames(path: str, n: int = CLIP_QA_FRAMES) -> list[dict]:
@@ -604,7 +672,7 @@ async def clip_issues(path: str, s: dict, product_url: str | None = None,
     if len(frames) < 2:
         return []
     spec = _qa_spec(s, "first") + (f"\n- ends on: {s['end_state']}" if s.get("end_state") else "")
-    text = (CLIP_QA.replace("{N}", str(len(frames))).replace("{SPEC}", spec)
+    text = (CLIP_QA.replace("{SEVERITY}", SEVERITY).replace("{N}", str(len(frames))).replace("{SPEC}", spec)
             .replace("{PRODUCT}", "\nThe LAST image is the user's real product: wherever it appears in the clip it "
                               "must keep exactly that shape, cap and label." if product_url else ""))
     faces = []  # each character's face (passport) and whole outfit (full-body front)
@@ -614,6 +682,7 @@ async def clip_issues(path: str, s: dict, product_url: str | None = None,
             if u and u not in (x for _, x in faces):
                 faces.append((f"{nm} ({label})", u))
     text = text.replace("{CAST}", CLIP_CAST.replace("{NAMES}", ", ".join(n for n, _ in faces)) if faces else "")
+    text += temporal.clip_block(s.get("events") or [])  # which events, in which order (the sequence check)
     parts = [{"type": "text", "text": text}, *frames]
     parts += [{"type": "image_url", "image_url": {"url": u}} for _, u in faces]
     if product_url:
@@ -621,7 +690,7 @@ async def clip_issues(path: str, s: dict, product_url: str | None = None,
     data = await _qa_json(parts, "engine.clip_qa", s)
     if data is None:
         return []
-    issues = [str(x) for x in (data.get("issues") or []) if str(x).strip()]
+    issues = [tag_issue(x, default_major=True) for x in (data.get("issues") or []) if str(x).strip()]
     return [] if data.get("ok") is True and not issues else issues[:QA_MAX_ISSUES]
 
 
@@ -655,18 +724,52 @@ def _ordered_refs(refs: list[dict]) -> list[dict]:
     return sorted(refs, key=rank)
 
 
+_REF_NUM = re.compile(r"\b(reference(?:\s+image|\s+photo)?s?)\s*#?(\d+)\b", re.I)
+
+
+def _named_refs(text: str, upload_refs: list[dict]) -> str:
+    """The planner numbers the user's uploads 1, 2... in upload order, but the image call puts the character views
+    first - so "exactly as in reference 1" pointed the image model at the wrong picture (a portrait instead of the
+    product). Name the upload instead; _refs_note says which image number it really is in this call."""
+    def sub(m):
+        k = int(m.group(2)) - 1
+        if not 0 <= k < len(upload_refs):
+            return m.group(0)
+        role = upload_refs[k].get("role")
+        what = "person" if role in PERSON_ROLES else role if role in PRODUCT_ROLES else "reference"
+        return f"the uploaded {what} photo"
+    return _REF_NUM.sub(sub, text or "")
+
+
+def _shows_product(s: dict, upload_refs: list[dict]) -> bool:
+    """Does this scene show the uploaded product (its references, or its prompt / objects naming it)?"""
+    idx = {i + 1 for i, r in enumerate(upload_refs) if r.get("role") in PRODUCT_ROLES}
+    if not idx:
+        return False
+    for x in s.get("references") or []:
+        n = x.get("index", -1) + 1 if isinstance(x, dict) else int(x) if str(x).isdigit() else -1
+        if n in idx:
+            return True
+    props = s.get("props")
+    text = " ".join([str(s.get("image_prompt") or ""), str(s.get("action") or ""), str(s.get("end_state") or ""),
+                     "; ".join(map(str, props)) if isinstance(props, (list, tuple)) else str(props or "")])
+    return any(int(m.group(2)) in idx for m in _REF_NUM.finditer(text))
+
+
 def _refs_note(refs: list[dict], first_index: int = 1) -> str:
     """Tell the image model what each uploaded reference image IS, so the person keeps their real face."""
     bits = []
     for n, r in enumerate(refs, start=first_index):
         role = r.get("role")
         if role in PERSON_ROLES:
-            bits.append(f"reference image {n} is THE PERSON in this film (a real person, the user's own photo): in "
+            bits.append(f"reference image {n} is THE PERSON in this film (the uploaded person photo, a real person): in "
                         "EVERY scene they look exactly as in that photo - same face and facial features, apparent age, "
                         "skin tone, hair colour and length, and the same outfit and accessories; never a look-alike, "
                         "never a costume change; the hairstyle changes only where this scene shows it (hair tied back)")
         elif role in PRODUCT_ROLES:
-            bits.append(f"reference image {n} is the {role}: exact shape, colours, label text and proportions")
+            bits.append(f"reference image {n} is the {role} (the uploaded {role} photo): copy it exactly - the same "
+                        "bottle / object silhouette and proportions, cap, collar and dropper, materials and colours, "
+                        "and the label's layout, typeface and text; never a generic or redesigned version")
         elif role in ("background", "style_reference"):
             bits.append(f"reference image {n} is a {role.replace('_', ' ')}")
     if not bits:
@@ -699,7 +802,7 @@ async def consistency_issues(cast_urls: list[str] | str, still_url: str, p: dict
     """What a viewer would notice changed between the character references (and the scene's location plate) and a
     scene still ([] = consistent)."""
     sheets = [cast_urls] if isinstance(cast_urls, str) else list(cast_urls)
-    text = (CONSISTENCY.replace("{K}", str(len(sheets)))
+    text = (CONSISTENCY.replace("{SEVERITY}", SEVERITY).replace("{K}", str(len(sheets)))
             .replace("{BIBLE}", json.dumps(p.get("bible") or {}, ensure_ascii=False)[:1500])) + (PLACE_CHECK if place_url else "")
     parts = [{"type": "text", "text": text},
              *[{"type": "image_url", "image_url": {"url": u}} for u in sheets + ([place_url] if place_url else [])],
@@ -707,8 +810,100 @@ async def consistency_issues(cast_urls: list[str] | str, still_url: str, p: dict
     data = await _qa_json(parts, "engine.story.consistency", note)
     if data is None:
         return []
-    diffs = [str(d) for d in (data.get("differences") or []) if str(d).strip()]
+    diffs = [tag_issue(d) for d in (data.get("differences") or []) if str(d).strip()]
     return [] if data.get("same") is True and not diffs else diffs[:6]
+
+
+FACE_MATCH = """Image 1 is a frame from a film. The images after it are passport portraits, in order: {NAMES}.
+For each of these characters whose face is visible in image 1 (not seen from behind, not fully hidden), judge whether
+it is the SAME person as their portrait: face shape, jaw and cheeks, eyes, nose, mouth, eyebrows, hairline, hair
+length and style, facial hair, skin tone and apparent age. Expression, lighting, wet or messy hair, tears and camera
+angle are NOT differences.
+Return ONLY JSON {"faces": [{"name": "...", "visible": true|false, "score": 0-10, "box": [x0, y0, x1, y1],
+"differences": "short: what differs"}]} where score 10 = certainly the same person, 7 = the same person, 4 = a
+look-alike, 0 = someone else, and box is that face in image 1 as fractions (0-1) of the image width and height."""
+FACE_MIN = 7  # a face scored below this is "another person": a MAJOR drift that is redrawn
+FACE_SMALL = 0.2  # a face narrower than this share of the frame is cropped and enlarged, then judged again
+
+
+async def _local_image(url: str, dest: Path) -> Path:
+    """A still (an http URL or a data: URL from the LLM Router) as a local file."""
+    if url.startswith("data:"):
+        import base64
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(base64.b64decode(url.split(",", 1)[1]))
+        return dest
+    return Path(await _download(url, dest))
+
+
+def _crop_face(src: Path, box: list, dest: Path) -> Path | None:
+    """The face box (fractions of the frame) with room around it, enlarged to 512 px tall; None without ffmpeg."""
+    ffmpeg = video_merge.find_ffmpeg()
+    try:
+        x0, y0, x1, y1 = (min(1.0, max(0.0, float(v))) for v in box)
+    except (TypeError, ValueError):
+        return None
+    if not ffmpeg or x1 <= x0 or y1 <= y0:
+        return None
+    w, h = x1 - x0, y1 - y0
+    x0, y0 = max(0.0, x0 - w * 0.6), max(0.0, y0 - h * 0.6)
+    w, h = min(1.0 - x0, w * 2.2), min(1.0 - y0, h * 2.2)
+    r = subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-i", str(src), "-vf",
+                        f"crop=iw*{w:.4f}:ih*{h:.4f}:iw*{x0:.4f}:ih*{y0:.4f},scale=-2:512", "-q:v", "3", str(dest)],
+                       capture_output=True, timeout=60)
+    return dest if r.returncode == 0 and dest.exists() else None
+
+
+async def _face_scores(frame_part: dict, faces: list[tuple[str, str]], note: dict | None) -> list[dict]:
+    names = ", ".join(n for n, _ in faces)
+    parts = [{"type": "text", "text": FACE_MATCH.replace("{NAMES}", names)}, frame_part,
+             *[{"type": "image_url", "image_url": {"url": u}} for _, u in faces]]
+    data = await _qa_json(parts, "engine.story.face", note, tokens=700)
+    return [f for f in ((data or {}).get("faces") or []) if isinstance(f, dict)]
+
+
+async def face_issues(who: list[dict], still_url: str, folder: Path, note: dict | None = None) -> list[str]:
+    """A face-only identity check of a frame against each character's passport portrait, scored 0-10. A face that
+    is small in the frame (a wide shot) is cropped, enlarged and scored again: at full-frame size the general check
+    cannot see it, and those were the frames that drew another person. Returns MAJOR issues ([] = same faces)."""
+    faces = [(c.get("name") or "the person", c["passport"]) for c in who if c.get("passport")][:MAX_CAST]
+    if not faces:
+        return []
+    scored = await _face_scores({"type": "image_url", "image_url": {"url": still_url}}, faces, note)
+    issues, local = [], None
+    for f in scored:
+        name = str(f.get("name") or "")
+        ref = next((u for n, u in faces if n.lower() == name.lower()), None)
+        if not f.get("visible") or not ref:
+            continue
+        try:
+            score = float(f.get("score"))
+        except (TypeError, ValueError):
+            continue
+        box, why = f.get("box"), str(f.get("differences") or "").strip()
+        try:
+            small = isinstance(box, list) and len(box) == 4 and float(box[2]) - float(box[0]) < FACE_SMALL
+        except (TypeError, ValueError):
+            small = False
+        if small:  # judge the enlarged face, not a few pixels of it
+            try:
+                import uuid
+                local = local or await _local_image(still_url, folder / f"frame_{uuid.uuid4().hex[:8]}.png")
+                crop = await asyncio.to_thread(_crop_face, local, box, folder / f"face_{uuid.uuid4().hex[:8]}.jpg")
+                if crop:
+                    again = await _face_scores(llm.image_part(crop), [(name, ref)], note)
+                    if again and again[0].get("visible") is not False:
+                        score = float(again[0].get("score", score))
+                        why = str(again[0].get("differences") or why).strip()
+            except Exception as e:  # the full-frame score stands
+                log.warning("face crop check failed: %s", e)
+        if note is not None:
+            note.setdefault("face_scores", []).append({"name": name, "score": score, "small": bool(small)})
+        if score < FACE_MIN:
+            issues.append(f"MAJOR: {name}'s face is a different person ({why or 'another face'}) -> draw exactly the "
+                          "face of their passport portrait: the same face shape, eyes, nose, mouth, eyebrows, hair, "
+                          "facial hair, skin tone and age")
+    return issues
 
 
 def story_scenes_approved(handoff: dict) -> bool:
@@ -959,13 +1154,15 @@ CAST_FRESH = 2  # then, while the FACE, hair or outfit is still wrong, the frame
 # A difference a viewer reads as "another person" or "another outfit" (a necklace or a bag is minor).
 MAJOR_DRIFT = re.compile(r"\b(face|facial|features|different (person|woman|man|girl|boy|character)|another (person|"
                          r"woman|man)|look-?alike|skin|older|younger|age|hair|hairstyle|bun|braid|beard|moustache|"
-                         r"curl\w*|bald|saree|sari|kurta|outfit|dress|shirt|jacket|wardrobe|clothes|clothing|garment|"
+                         r"curl\w*|bald|saree|sari|kurta|outfit|dress|shirt|t-shirt|jacket|windbreaker|coat|raincoat|hoodie|sweater|"
+                         r"pyjamas?|pajamas?|trousers|jeans|skirt|suit|uniform|wardrobe|clothes|clothing|garment|"
                          r"colou?r of (her|his|the) (saree|dress|shirt|kurta|outfit))\b", re.I)
 
 
 def drift_score(drift: list[str]) -> tuple[int, int]:
-    """(major, total) differences: a frame with fewer face / hair / outfit differences always wins."""
-    return sum(1 for d in drift if MAJOR_DRIFT.search(d)), len(drift)
+    """(major, total) differences: a frame with fewer face / hair / outfit differences always wins. A checker's own
+    MAJOR / MINOR tag decides; an untagged difference is major when it names the face, hair or outfit."""
+    return severity_score(drift)
 
 
 def _sound(s: dict) -> str:
@@ -984,19 +1181,42 @@ def _voice(s: dict) -> str:
     return "narration" if str(s.get("script") or "").strip() else "none"
 
 
-def _continuity(i: int, s: dict, scenes: list[dict], has_prev_still: bool) -> str:
-    """For scenes after the first: tie the still to the previous scene (its last frame and the link between them)."""
+def _continuity(i: int, s: dict, scenes: list[dict], has_prev_still: bool, mode: str = "draw") -> str:
+    """For scenes after the first: tie the still to the previous scene (its last frame and the link between them).
+    mode "draw": same place, the shot starts right after it; "ref": a new place or a later time - only the people,
+    their look and what they carry continue."""
     if i == 0:
         return ""
     prev = scenes[i - 1]
     bits = [f"\nCONTINUES FROM THE PREVIOUS SCENE, which ended on: {str(prev.get('end_state') or prev.get('image_prompt')).rstrip('. ')}"]
     if s.get("link"):
         bits.append(f"Link: {str(s['link']).rstrip('. ')}")
-    if has_prev_still:
+    if has_prev_still and mode == "ref":
+        bits.append("The LAST reference image is the previous scene's LAST frame: every character keeps exactly that "
+                    "face, hair, wardrobe and what they carry, and objects keep the state they ended in; this scene "
+                    "is in the place and at the time it describes, so do not copy that frame's set or framing")
+    elif has_prev_still:
         bits.append("The LAST reference image is the previous scene's LAST frame: this shot starts right after it - "
                     "same subject, wardrobe, hair, props in the same state and place, set, lighting and colour grade; "
                     "only the framing and the moment change")
     return ". ".join(bits) + "."
+
+
+SAME_SHOT = re.compile(r"\b(continu\w*|same (moment|shot|take)|picks? up (right )?where|one (take|shot)|unbroken|"
+                       r"no cut|seamless)\b", re.I)
+
+
+def handoff_mode(prev: dict | None, s: dict, prev_has_end: bool) -> str:
+    """How scene s takes over from the previous scene's last frame (every scene after the first does):
+    "exact" - the same shot goes on: that frame IS this scene's first frame (the previous clip ends on it, this one
+    starts on it: no visible cut); "draw" - same place and moment, new angle: drawn from that frame; "ref" - a new
+    place or a later time: the frame keeps the people, their look and props."""
+    if not prev:
+        return ""
+    if continues(prev, s):
+        link = " ".join(str(s.get(k) or "") for k in ("link", "transition_in"))
+        return "exact" if prev_has_end and SAME_SHOT.search(link) else "draw"
+    return "ref"
 
 
 def _cast_note(members: list[dict], first: int = 1) -> str:
@@ -1087,13 +1307,42 @@ def _motion(app_id: str, s: dict, q: dict, fix: str = "") -> str:
     talks = (f"{s.get('speaker') or 'The speaker'} is talking the whole shot, mouth moving naturally as if speaking, "
              "face turned three-quarters to the camera and fully visible, nothing covers the mouth, small natural "
              "movements; nobody else speaks or faces the camera" if s.get("line") else "")
-    bits = [s.get("action") or "", talks, f"Camera: {s['camera']}" if s.get("camera") else "",
+    bits = [s.get("sequence_note") or "", s.get("action") or "", talks,
+            f"Camera: {s['camera']}" if s.get("camera") else "",
             f"Starts: {s['start_state']}" if s.get("start_state") else "",
             f"Ends: {s['end_state']}" if s.get("end_state") else "",
             _sound(s) if q.get("audio") else ""]
     text = lead + (". ".join(b.rstrip(".") for b in bits if b) or s["image_prompt"])
     prompt, _neg = model_skills.finalize_motion(q["video_model"], text, sound=q["audio"])
     return prompt
+
+
+def _sequence_fields(s: dict, record: dict, n: int) -> None:
+    """Scene n's events (for the clip check), its continuity brief (state at start / end, for the images) and the
+    events in order (for the clip prompt), from the approved plan's temporal record."""
+    events = temporal.scene_events_text(record, n)
+    if not events:
+        return
+    row = next((r for r in record.get("scenes") or [] if r.get("n") == n), {})
+    s["events"] = events
+    s["continuity_brief"] = str(row.get("brief") or "")[:1500]
+    s["sequence_note"] = ("In this order, each shown from start to end: "
+                          + "; ".join(f"{k}. {e['description']}" for k, e in enumerate(events, start=1)))[:700]
+
+
+def continues(prev: dict | None, s: dict) -> bool:
+    """Does scene s pick up the very moment scene prev ended (same place, no cut in time)? Then its first frame is
+    drawn from prev's real last frame, not only from words."""
+    if not prev:
+        return False
+    link = " ".join(str(s.get(k) or "") for k in ("link", "transition_in"))
+    if re.search(r"\b(time jump|later|meanwhile|next (day|morning|night)|years?|hours?|flash ?back|elsewhere|"
+                 r"new (place|location)|montage|opening)\b", link, re.I):
+        return False
+    if flow_budget._place(prev) and flow_budget._place(s):  # both places known: the same place continues
+        return not flow_budget.place_changed(prev, s)
+    return bool(re.search(r"\b(continu\w*|same (moment|place|shot|room)|cut on (action|movement)|carried|picks? up|"
+                          r"motion carried|reverse cut|over the shoulder)\b", link, re.I))
 
 
 class Checkpoint:
@@ -1142,7 +1391,7 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
     _st = handoff.get("_story") or {}
     if code_motion(_st.get("mode"), _st.get("motion_engine")):  # Opus animates it: say so in every message
         app = {**app, "name": OPUS_MOTION_NAME}
-    q = quality(_st.get("mode"), _st.get("motion_engine"))
+    q = dict(quality(_st.get("mode"), _st.get("motion_engine")))  # its own copy: a run may reorder its clip chain
     key = fal_key()
     work.mkdir(parents=True, exist_ok=True)
     refs = []
@@ -1277,6 +1526,7 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
     if coded:
         await progress(f"{app['name']}: no video model - every keyframe is animated in code from an LLM motion plan")
     style = _style(p["bible"]) + _locks(p.get("continuity") or {})
+    upload_refs = list(refs)  # the planner's "reference N" is upload order
     refs = _ordered_refs(refs)
     ref_urls = [r["url"] for r in refs][:7]
     person_url = next((r["url"] for r in refs if r.get("role") in PERSON_ROLES), None)
@@ -1393,6 +1643,10 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
             series["cast"] = remember_cast(series.get("cast") or [], cast)
     if look:
         p["look_frame_url"] = look
+    if cast and any(m.startswith("seedance") for m in clip_models(q)[:1]) and photoreal_people(p, cast):
+        q["_no_seedance"] = True
+        await progress(f"{app['name']}: realistic people in this film - clips go to "
+                       f"{clip_models(q)[0]} first (Seedance refuses frames that may show a real person)")
 
     def place_of(i: int) -> tuple[dict, str] | None:
         return scene_place[i] if i < len(scene_place) else None
@@ -1460,15 +1714,17 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
         await progress(f"{app['name']}: AI checking {label}")
         issues = await scene_issues(img, s, which, prev_url, product_url)
         rec = {"issues": issues, "redrawn": False}
-        if issues:
-            await progress(f"{app['name']}: {label} - {issues[0][:90]}; redrawing")
-            fix = prompt + "\nFIX THESE PROBLEMS (a check of the previous attempt found them): " + "; ".join(issues)
+        majors = [x for x in issues if is_major(x)]
+        if majors:  # a coin count or the hand holding a glass is not worth a new image (MINOR issues stay)
+            await progress(f"{app['name']}: {label} - {plain(majors[0])[:90]}; redrawing")
+            fix = prompt + "\nFIX THESE PROBLEMS (a check of the previous attempt found them): " + "; ".join(
+                plain(x) for x in majors + [x for x in issues if x not in majors])
             try:
                 img2 = _url(await _fal(fal_helper.generate_image, key, q["image_model"], fix, **img_kw), "image")
                 issues2 = await scene_issues(img2, s, which, prev_url, product_url)
                 # A redraw that fixes the scene must not lose the user's face again.
                 face_ok = not person_url or len(await identity_issues(person_url, img2, s.get("action") or "")) <= (best_n or 0)
-                if len(issues2) < len(issues) and face_ok:
+                if severity_score(issues2) < severity_score(issues) and face_ok:
                     img, rec = img2, {"issues": issues2, "redrawn": True, "fixed": issues}
             except Exception as e:  # the first image is still usable
                 log.warning("%s redraw failed: %s", label, e)
@@ -1482,15 +1738,21 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
             return None
         who, anchor = anchor_for(s, i)
         await progress(f"{app['name']}: scene {i + 1}/{len(p['scenes'])} last frame")
-        prompt = (f"The LAST frame of the same shot, a moment later, after this action: {s.get('action') or ''}. "
-                  f"It shows exactly: {s['end_state']}. The FIRST reference image is the first frame of the shot: "
+        prod = next((r for r in refs if r.get("role") in PRODUCT_ROLES), None) if _shows_product(s, upload_refs) else None
+        rest = [r for r in refs if r is not prod]
+        off = 1 if prod else 0
+        prompt = (_named_refs(f"The LAST frame of the same shot, a moment later, after this action: {s.get('action') or ''}. "
+                              f"It shows exactly: {s['end_state']}. ", upload_refs)
+                  + "The FIRST reference image is the first frame of the shot: "
                   "same people, wardrobe, product, set, lighting and colour grade; only what the action changed is "
                   "different; no object is added or duplicated unless the action adds it."
-                  + _cast_note(who, first=2)
-                  + props_line(s, last=True) + _refs_note(refs[:3], 2 + len(anchor)) + style)
+                  + (_refs_note([prod], 2) if prod else "")
+                  + _cast_note(who, first=2 + off)
+                  + _named_refs(("\n" + s["continuity_brief"]) if s.get("continuity_brief") else "", upload_refs)
+                  + _named_refs(props_line(s, last=True), upload_refs) + _refs_note(rest[:3], 2 + len(anchor) + off) + style)
         try:
             img_kw = {"aspect_ratio": ar, "num_images": 1,
-                      "image_urls": ([still] + anchor + ref_urls[:3])[:MAX_IMAGE_REFS]}
+                      "image_urls": ([still] + ([prod["url"]] if prod else []) + anchor + [r["url"] for r in rest][:3])[:MAX_IMAGE_REFS]}
             last = await draw(prompt, img_kw, s, f"scene {i + 1} last frame", which="last", prev_url=still)
             # the clip interpolates towards this frame: a drifted face or outfit here drifts the whole clip
             return await match_cast(i, s, last, img_kw, who, "last", prompt)
@@ -1519,20 +1781,33 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
     ends: list[str | None] = [None] * len(p["scenes"])
     gate = asyncio.Semaphore(PARALLEL_SCENES)
 
-    async def first_frame(i: int, s: dict) -> str:
-        await progress(f"{app['name']}: scene {i + 1}/{len(p['scenes'])} still")
+    async def first_frame(i: int, s: dict, prev_frame: str | None = None, mode: str = "draw") -> str:
+        await progress(f"{app['name']}: scene {i + 1}/{len(p['scenes'])} still"
+                       + (" (from the previous scene's last frame)" if prev_frame else ""))
         who, anchor = anchor_for(s, i)
         img_kw = {"aspect_ratio": ar, "num_images": 1}
-        arch = [a for a in archive.get(i, [])][:MAX_IMAGE_REFS - len(anchor)]
-        urls = (anchor + [a["fal_url"] for a in arch] + ref_urls[:5])[:MAX_IMAGE_REFS]
+        # A scene that shows the product gets its photo FIRST (the models copy early references most closely).
+        prod = next((r for r in refs if r.get("role") in PRODUCT_ROLES), None) if _shows_product(s, upload_refs) else None
+        lead = [prod["url"]] if prod else []
+        rest = [r for r in refs if r is not prod]
+        off = len(lead)
+        arch = [a for a in archive.get(i, [])][:MAX_IMAGE_REFS - len(anchor) - off]
+        urls = (lead + anchor + [a["fal_url"] for a in arch] + [r["url"] for r in rest][:5])[:MAX_IMAGE_REFS - (1 if prev_frame else 0)]
+        if prev_frame:  # the continuity handoff: the picture the previous scene really ended on, as the LAST ref
+            urls.append(prev_frame)
+            s["handoff_from"] = i  # 1-based number of the scene it continues
         if urls:
             img_kw["image_urls"] = urls
+        brief = ("\n" + s["continuity_brief"]) if s.get("continuity_brief") else ""
+        lead_note = _refs_note([prod], 1) if prod else ""
         if s.get("as_written"):  # the user's words exactly; only what their own reference images are is added
-            prompt = s["image_prompt"] + _cast_note(who) + _refs_note(refs[:5], len(anchor) + len(arch) + 1)
+            prompt = (_named_refs(s["image_prompt"], upload_refs) + lead_note + _cast_note(who, 1 + off)
+                      + _refs_note(rest[:5], len(anchor) + len(arch) + off + 1))
         else:
-            prompt = (s["image_prompt"] + props_line(s) + _cast_note(who) + look_note(len(anchor), i)
-                      + _archive_note(arch, len(anchor) + 1) + _refs_note(refs[:5], len(anchor) + len(arch) + 1)
-                      + _continuity(i, s, p["scenes"], False) + style)
+            prompt = (_named_refs(s["image_prompt"] + props_line(s), upload_refs) + lead_note + _cast_note(who, 1 + off)
+                      + look_note(len(anchor) + off, i) + _archive_note(arch, len(anchor) + off + 1)
+                      + _refs_note(rest[:5], len(anchor) + len(arch) + off + 1)
+                      + _named_refs(brief, upload_refs) + _continuity(i, s, p["scenes"], bool(prev_frame), mode) + style)
         s["still_prompt"] = prompt
         s["cast_in_scene"] = [c.get("name") or "the person" for c in who]
         still = await draw(prompt, img_kw, s, f"scene {i + 1}", which="first")
@@ -1544,21 +1819,33 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
         face, hair or outfit still differs after the edits, the frame is drawn again from scratch (with the
         character references) and the closest one is kept: no clip is made from a frame with another person."""
         refs_who = [u for c in who for u in c["urls"]]
+        # The check sees each character's face and whole outfit (passport + front): the back view only cost tokens.
+        check_refs = [u for c in who for u in dict.fromkeys((c.get("passport"), c.get("front"))) if u] or refs_who
         pl = place_of(i)
         frame = "" if which == "first" else " last frame"
+        faces_dir = work / "face_check"
+
+        async def check(img: str) -> list[str]:
+            general, faces = await asyncio.gather(
+                consistency_issues(check_refs, img, p, pl[1] if pl else None, note=s),
+                face_issues(who, img, faces_dir, note=s))
+            return faces + [d for d in general if not (faces and is_major(d) and "face" in d.lower())]
+
         if refs_who or pl:
-            drift = await consistency_issues(refs_who, still, p, pl[1] if pl else None, note=s)
+            drift = await check(still)
             fixed: list[str] = []
             for _ in range(CAST_REDRAWS):
-                if not drift:
+                if not drift_score(drift)[0]:  # only a MAJOR difference (face, hair, outfit, place) is edited
                     break
-                await progress(f"{app['name']}: scene {i + 1}{frame} character/place check - {drift[0][:80]}; fixing it")
+                major = [d for d in drift if is_major(d)]
+                await progress(f"{app['name']}: scene {i + 1}{frame} character/place check - {plain(major[0])[:80]}; "
+                               "fixing it")
                 fixed += drift
                 # An EDIT of this frame: its composition, pose and camera stay; only the differences change. Drawing
                 # it again from the same text brings the same drift back.
                 fix = ("EDIT reference image 1 - this scene's frame. Keep its composition, camera, poses, action and "
                        "everything else exactly as it is; change ONLY these differences so the characters match their "
-                       "references and the place matches its location plate: " + "; ".join(drift) + "."
+                       "references and the place matches its location plate: " + "; ".join(plain(d) for d in drift) + "."
                        + _cast_note(who, first=2)
                        + (look_note(2 + len(refs_who), i) if pl else ""))
                 edit_kw = {**img_kw, "image_urls": ([still] + refs_who + ([pl[1]] if pl else []))[:MAX_IMAGE_REFS]}
@@ -1567,25 +1854,25 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                 except Exception as e:  # the earlier still is still usable
                     log.warning("scene %s character fix failed: %s", i + 1, e)
                     break
-                drift2 = await consistency_issues(refs_who, again, p, pl[1] if pl else None, note=s)
+                drift2 = await check(again)
                 if drift_score(drift2) <= drift_score(drift):
                     still, drift = again, drift2
             for k in range(CAST_FRESH if refs_who and prompt else 0):
                 if not drift_score(drift)[0]:
                     break
-                major = [d for d in drift if MAJOR_DRIFT.search(d)]
-                await progress(f"{app['name']}: scene {i + 1}{frame} still shows a different look ({major[0][:70]}); "
+                major = [d for d in drift if is_major(d)]
+                await progress(f"{app['name']}: scene {i + 1}{frame} still shows a different look ({plain(major[0])[:70]}); "
                                f"drawing it again from the character references ({k + 1}/{CAST_FRESH})")
                 fixed += drift
                 redo = (prompt + "\nMOST IMPORTANT: every character is EXACTLY the person in their reference images - "
                         "the same face (shape, eyes, nose, mouth, eyebrows, skin tone, age), the same hair and the same "
-                        "outfit and colours. Avoid: " + "; ".join(major) + ".")
+                        "outfit and colours. Avoid: " + "; ".join(plain(d) for d in major) + ".")
                 try:
                     again = _url(await _fal(fal_helper.generate_image, key, q["image_model"], redo, **img_kw), "image")
                 except Exception as e:  # the closest frame so far is still usable
                     log.warning("scene %s fresh character redraw failed: %s", i + 1, e)
                     break
-                drift2 = await consistency_issues(refs_who, again, p, pl[1] if pl else None, note=s)
+                drift2 = await check(again)
                 if drift_score(drift2) < drift_score(drift):
                     still, drift = again, drift2
             suffix = "" if which == "first" else "_last"
@@ -1595,7 +1882,15 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                 s["consistency_left" + suffix] = drift
         return still
 
+    drawn_evt = [asyncio.Event() for _ in p["scenes"]]
+
     async def frames(i: int, s: dict) -> None:
+        try:
+            await _frames(i, s)
+        finally:  # set even on failure: a scene waiting for this one never hangs
+            drawn_evt[i].set()
+
+    async def _frames(i: int, s: dict) -> None:
         kept = (ck.get("scenes") or {}).get(str(i))
         if kept and kept.get("still"):  # drawn (and checked) on the earlier attempt
             stills[i], ends[i] = kept["still"], kept.get("end")
@@ -1603,8 +1898,28 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
             board[i]["still_url"] = stills[i]
             await publish()
             return
+        prev_frame, mode = None, ""
+        if i > 0 and (i - 1) in board_at and not coded:
+            # Every scene takes over from the frame the previous scene really ended on. Waited for OUTSIDE the
+            # gate: the scene it waits on may still need a gate slot.
+            await drawn_evt[i - 1].wait()
+            prev_frame = ends[i - 1] or stills[i - 1]
+            mode = handoff_mode(p["scenes"][i - 1], s, bool(ends[i - 1])) if prev_frame else ""
+            s["handoff"] = mode or None
+        if mode == "exact":  # the same shot goes on: the previous scene's last frame IS this scene's first frame
+            stills[i] = still = prev_frame
+            s["handoff_from"] = i
+            await progress(f"{app['name']}: scene {i + 1}/{len(p['scenes'])} starts on scene {i}'s last frame")
+            board[i]["still_url"] = still
+            await publish()
+            async with gate:
+                ends[i] = await end_frame(i, s, still)
+            saved = ck.get("scenes") or {}
+            saved[str(i)] = {"still": stills[i], "end": ends[i], "scene": s}
+            ck.put("scenes", saved)
+            return
         async with gate:
-            stills[i] = still = await first_frame(i, s)
+            stills[i] = still = await first_frame(i, s, prev_frame, mode or "draw")
             board[i]["still_url"] = still
             await publish()
             if not coded:  # code animation needs no last frame: one image call less per scene
@@ -1709,8 +2024,12 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                     "qa": s.get("qa") or {}, "clip_url": None, "model": used, "path": path}
         # A last frame very different from the first makes the clip model MORPH one into the other: for a large
         # change the last frame only guides the next scene; the clip performs the action from the prompt.
-        end = ends[i] if use_end_frame(s) else None
-        if end and s.get("consistency_left_last"):  # a drifted last frame would pull the whole clip towards it
+        nxt = p["scenes"][i + 1] if i + 1 < len(p["scenes"]) else {}
+        if ends[i] and nxt.get("handoff") == "exact":  # the next clip starts on this frame: land on it exactly
+            end = ends[i]
+        else:
+            end = ends[i] if use_end_frame(s) else None
+        if end and s.get("consistency_left_last") and nxt.get("handoff") != "exact":  # a drifted last frame would pull the whole clip towards it
             log.info("scene %s: last frame still drifts (%s); the clip runs without it", i + 1,
                      s["consistency_left_last"][0][:120])
             s["end_frame_dropped"] = True
@@ -1722,23 +2041,28 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
             await progress(f"{app['name']}: AI checking scene {i + 1} clip")
             issues = await clip_issues(path, s, product_url, cast=who)
             rec = {"issues": issues, "retaken": False}
-            for take in range(2, 2 + CLIP_RETAKES):  # new takes while the clip has problems; the fewest issues wins
-                if not issues:
+            for take in range(2, 2 + CLIP_RETAKES):  # a new take only for a MAJOR problem; fewer majors wins
+                majors = [x for x in issues if is_major(x)]
+                if not majors:
                     break
-                await progress(f"{app['name']}: scene {i + 1} clip - {issues[0][:90]}; making take {take}")
+                await progress(f"{app['name']}: scene {i + 1} clip - {plain(majors[0])[:90]}; making take {take}")
                 try:
-                    morph = any(w in " ".join(issues).lower() for w in ("morph", "jump", "cuts to", "changes shape",
-                                                                        "different face", "outfit", "hair"))
+                    morph = any(w in " ".join(majors).lower() for w in ("morph", "jump", "cuts to", "changes shape",
+                                                                        "different face", "outfit", "hair",
+                                                                        "action_skipped", "wrong_event_order"))
                     clip2, used2 = await _clip(app, i, len(p["scenes"]), s, still, ar, q, key, progress,
-                                               end=None if morph else end, fix="; ".join(issues), cast=who)
+                                               end=None if morph else end, fix="; ".join(plain(x) for x in issues),
+                                               cast=who)
                     path2 = await _download(clip2, work / f"scene_{i + 1:02d}_take{take}.mp4")
                     issues2 = await clip_issues(path2, s, product_url, cast=who)
-                    if len(issues2) < len(issues):
+                    if severity_score(issues2) < severity_score(issues):
                         rec = {"issues": issues2, "retaken": True, "fixed": (rec.get("fixed") or []) + issues}
                         clip, used, path, issues = clip2, used2, path2, issues2
                 except Exception as e:  # the best take so far is still usable
                     log.warning("scene %s take %s failed: %s", i + 1, take, e)
                     break
+            if s.get("events"):  # the sequence verdict: shown per scene, a FAIL offers a re-render of that scene
+                rec["sequence"] = temporal.verdict(rec.get("issues"), "clip_qa" not in (s.get("qa_unchecked") or []))
             s.setdefault("qa", {})["clip"] = rec
         if talk[i]:  # a short drama's spoken line, in the speaker's voice, lip-synced onto this clip
             path = await speak_on_camera(i, s, path)
@@ -1749,7 +2073,9 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                 "end_still_url": ends[i], "change": s.get("change") or "",
                 "image_prompt": s.get("still_prompt") or s.get("image_prompt") or "",
                 "motion_prompt": s.get("motion_prompt") or "", "props": s.get("props") or "",
-                "qa": s.get("qa") or {}, "clip_url": clip, "model": used, "path": path}
+                "qa": s.get("qa") or {}, "clip_url": clip, "model": used, "path": path,
+                "events": [e["id"] for e in s.get("events") or []], "handoff_from": s.get("handoff_from"),
+                "handoff": s.get("handoff")}
 
     done = await all_or_nothing([scene(i, s) for i, s in enumerate(p["scenes"])])
     await progress(f"{app['name']}: joining {len(done)} clips")
@@ -1862,7 +2188,7 @@ async def rerender_scene(out: dict, n: int, instruction: str, work: Path, progre
     cut still matches) and a new clip, both AI-checked, spliced into the finished film over exactly that scene's
     time span. The narration, music and the other scenes (with their graphics) stay as they were.
     Returns {"path", "scene": the updated scene entry}."""
-    q, key = quality(), fal_key()
+    q, key = dict(quality()), fal_key()
     if out.get("clip_models"):  # the same clip chain the film was made with (3D motion: Seedance 2.0 first)
         q = {**q, "video_model": out["clip_models"][0], "fallbacks": out["clip_models"][1:]}
     scenes, spans = out.get("scenes") or [], out.get("spans") or []
@@ -2293,7 +2619,8 @@ async def _clip(app, i, n, s, still, ar, q, key, progress, end: str | None = Non
                     s["clip_refs"] = len(rrefs)
                     return _url(vid, "video"), m
                 except Exception as e:  # a consistency aid: an endpoint failure still gets the plain clip
-                    if type(e).__name__ == "RunCancelled" or any(k in str(e).lower() for k in REFUSAL_MARKERS):
+                    if (type(e).__name__ == "RunCancelled" or any(k in str(e).lower() for k in REFUSAL_MARKERS)
+                            or _errors.refusal_reason(e, m)):  # the same frame is refused again without refs
                         raise
                     log.warning("scene %s clip with character references failed on %s (%s); retrying without them",
                                 i + 1, m, str(e)[:200])
@@ -2314,6 +2641,9 @@ async def _clip(app, i, n, s, still, ar, q, key, progress, end: str | None = Non
             if type(e).__name__ == "RunCancelled":
                 raise
             last = e
+            if (m.startswith("seedance") and _errors.refusal_reason(e, m) == "real_person"
+                    and not any(q is v for v in (*QUALITY.values(), MOTION_3D_MODELS))):  # never a shared preset
+                q["_no_seedance"] = True  # the other scenes and takes of this film skip the refusal
             log.warning("scene %s clip on %s failed (%s); trying the next clip model", i + 1, m, str(e)[:200])
     raise EngineError(f"Every clip model failed scene {i + 1}: {str(last)[:300]}")
 
