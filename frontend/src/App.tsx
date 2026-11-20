@@ -208,6 +208,7 @@ export default function App() {
                 onEditScene={(n: number, f: any) => act(() => api.editScene(r.id, n, f))()}
                 onRegenScene={(n: number, how: string) => act(() => api.regenerateScene(r.id, n, how))()}
                 onPalette={(o: number) => act(() => api.switchPalette(r.id, o))()}
+                onMotionEngine={(e: string) => act(() => api.switchMotionEngine(r.id, e))()}
                 onCancel={() => act(() => api.cancel(r.id))()}
                 onRerender={(n: number, how: string, sid?: string) => act(() => api.rerenderScene(r.id, n, how, sid))()}
                 onText={(sid: string, items: any[]) => act(() => api.saveText(r.id, sid, items))()}
@@ -526,7 +527,7 @@ function Turn(p: any) {
       <div className="vr-msg bot">
         <span className="vr-avatar" aria-hidden>{I.spark}</span>
         <div className="vr-reply">
-          {run.story_intel?.plan?.scenes?.length > 0 && <StoryPanel run={run} onEdit={p.onEditScene} onRegen={p.onRegenScene} onPalette={p.onPalette} />}
+          {run.story_intel?.plan?.scenes?.length > 0 && <StoryPanel run={run} onEdit={p.onEditScene} onRegen={p.onRegenScene} onPalette={p.onPalette} onMotionEngine={p.onMotionEngine} />}
           {run.enhanced_prompt && !run.story_intel?.plan && (
             <Fold title={t("chat.enhanced")} meta={`${run.agent_label || t("chat.fromWords")}${run.agent_why ? ` · ${run.agent_why}` : ""}`}>
               {run.video_intelligence?.categories?.length > 0 && (
@@ -560,7 +561,12 @@ const txt = (v: any): string => Array.isArray(v) ? v.map(txt).join("; ") : v && 
 
 const PALETTE_SWATCH: Record<number, string[]> = { 1: ["#F4EFE6", "#4B2A91", "#141414"], 2: ["#151A21", "#14E0C8", "#F5F7FA"], 3: ["#F2EBDD", "#B4532A", "#2B2B2B"] }
 
-function MotionPlan({ mg, editable, onPalette }: { mg: any; editable: boolean; onPalette: (o: number) => void }) {
+const MOTION_ENGINES: [string, string, string][] = [
+  ["opus_llm", "Opus LLM", "No video model: Opus plans each keyframe's motion and code renders it (camera, layers, SFX)"],
+  ["video_model", "AI video model", "Each keyframe is filmed as an AI video clip"],
+]
+
+function MotionPlan({ mg, editable, onPalette, engine, onMotionEngine }: { mg: any; editable: boolean; onPalette: (o: number) => void; engine?: string; onMotionEngine?: (e: string) => void }) {
   const { t } = useT()
   const chosen = Number(mg.palette?.option)
   const art = mg.art_direction || {}
@@ -582,6 +588,14 @@ function MotionPlan({ mg, editable, onPalette }: { mg: any; editable: boolean; o
         ))}
       </div>
       {mg.palette?.why && <p className="vr-muted sm">{mg.palette.why}</p>}
+      <div className="vr-palettes" role="group" aria-label="Motion engine">
+        {MOTION_ENGINES.map(([k, label, why]) => (
+          <button key={k} className={`vr-palette ${(engine || "video_model") === k ? "on" : ""}`} title={why}
+            disabled={!editable || !onMotionEngine || (engine || "video_model") === k} onClick={() => onMotionEngine?.(k)}>
+            {label}
+          </button>
+        ))}
+      </div>
       <details className="vr-story-sec" open><summary>Script · {mg.beats?.length || 0} visual beats</summary>
         {(mg.beats || []).map((b: any) => <p key={b.id}><b>{b.id}</b> <span className="vr-muted">{b.role}</span> — {b.line}</p>)}
         {mg.connection && <p className="vr-muted sm">{mg.connection}</p>}
@@ -597,7 +611,7 @@ function MotionPlan({ mg, editable, onPalette }: { mg: any; editable: boolean; o
   )
 }
 
-function StoryPanel({ run, onEdit, onRegen, onPalette }: { run: Run; onEdit: (n: number, f: any) => void; onRegen: (n: number, how: string) => void; onPalette: (o: number) => void }) {
+function StoryPanel({ run, onEdit, onRegen, onPalette, onMotionEngine }: { run: Run; onEdit: (n: number, f: any) => void; onRegen: (n: number, how: string) => void; onPalette: (o: number) => void; onMotionEngine?: (e: string) => void }) {
   const intel = run.story_intel, plan = intel.plan, c = intel.classification || {}, r = intel.research, v = intel.validation || {}
   const editable = run.status === "awaiting_approval" || run.status === "needs_clarification"
   const issues = [...(v.rules || []), ...(v.issues || [])]
@@ -610,7 +624,7 @@ function StoryPanel({ run, onEdit, onRegen, onPalette }: { run: Run; onEdit: (n:
           {[c.category, c.story_type, c.audience, c.tone].filter(Boolean).map((x: string) => <span key={x} className="vr-chip">{String(x).replace(/_/g, " ")}</span>)}
         </div>
         {plan.logline && <p className="vr-story-log">{plan.logline}</p>}
-        {mg ? <MotionPlan mg={mg} editable={editable} onPalette={onPalette} /> : plan.story_concept && <p>{plan.story_concept}</p>}
+        {mg ? <MotionPlan mg={mg} editable={editable} onPalette={onPalette} engine={intel.motion_engine} onMotionEngine={onMotionEngine} /> : plan.story_concept && <p>{plan.story_concept}</p>}
         {r && (r.summary || r.note) && (
           <details className="vr-story-sec"><summary>Research{r.sources?.length ? ` · ${r.sources.length} sources` : ""}</summary>
             {r.summary && <p>{r.summary}</p>}{r.note && <p className="vr-muted sm">{r.note}</p>}
@@ -849,7 +863,7 @@ function PlanAnswer({ run, latest, staged, onApprove, onRecover, onSelect, onRer
   const { t } = useT()
   const { plan, apps } = run
   const [accept, setAccept] = useState(false)
-  const names = plan.steps.map((s: any) => apps[s.app_id]?.name || s.app_id)
+  const names = plan.steps.map((s: any) => (s.handoff?.app_name || apps[s.app_id]?.name) || s.app_id)
   const changes = run.plan_changes || []
   const simulated = plan.steps.filter((s: any) => !isConnected(apps[s.app_id]?.adapter)).length
   const failed = run.status === "failed"
@@ -882,8 +896,8 @@ function PlanAnswer({ run, latest, staged, onApprove, onRecover, onSelect, onRer
             const st = ex.status || "planned"
             return (
               <li key={s.step_id}>
-                <StatusDot status={st} />{apps[s.app_id]?.name}<span>{statusLabel(st, t)}{ex.mock && st === "succeeded" ? t("plan.simulatedSuffix") : ""}</span>
-                {st === "running" && ex.message && <em className="vr-live">{ex.message.replace(`${apps[s.app_id]?.name}: `, "")}</em>}
+                <StatusDot status={st} />{(s.handoff?.app_name || apps[s.app_id]?.name)}<span>{statusLabel(st, t)}{ex.mock && st === "succeeded" ? t("plan.simulatedSuffix") : ""}</span>
+                {st === "running" && ex.message && <em className="vr-live">{ex.message.replace(`${(s.handoff?.app_name || apps[s.app_id]?.name)}: `, "")}</em>}
               </li>
             )
           })}
@@ -963,7 +977,6 @@ function Handoff({ h }: { h: any }) {
           <button className="vr-ghost sm" onClick={copy}>{copied ? t("nav.copied") : t("plan.copyPrompt")}</button>
         </div>
         {h.notes?.length > 0 && <ul className="vr-muted sm">{h.notes.map((n: string, i: number) => <li key={i}>{n}</li>)}</ul>}
-        <p className="vr-muted sm">{t("plan.sentTo")} <code>{h.endpoint}</code></p>
       </div>
     </Fold>
   )
@@ -1220,20 +1233,25 @@ function SceneCheck({ qa }: { qa?: Record<string, { issues?: string[]; redrawn?:
 const RATIO: Record<string, string> = { "16:9": "16 / 9", "9:16": "9 / 16", "1:1": "1 / 1", "4:5": "4 / 5", "4:3": "4 / 3", "3:4": "3 / 4", "21:9": "21 / 9" }
 
 /** Scene count and frame shape the plan asked for, so the skeleton matches the video that is coming. */
-function stageShape(run: Run): { scenes: number; ratio: string; vertical: boolean } {
+function stageShape(run: Run): { scenes: number; ratio: string; vertical: boolean; wh: number } {
   const req = (run.plan?.steps || []).map((s: any) => s.handoff?.request || {}).find((r: any) => r.scene_count || r.scenes || r.aspect_ratio) || {}
   const u = run.understanding || {}
   const n = Number(req.scene_count ?? req.scenes ?? u.scene?.scene_count) || (u.scene?.shot_structure === "single_shot" ? 1 : 4)
   const ar = String(req.aspect_ratio ?? req.settings?.aspect ?? u.constraints?.aspect_ratio ?? "16:9")
   const [w, h] = ar.split(":").map(Number)
-  return { scenes: Math.min(Math.max(n, 1), 60), ratio: RATIO[ar] || (w && h ? `${w} / ${h}` : "16 / 9"), vertical: !!(w && h && h > w) }
+  return { scenes: Math.min(Math.max(n, 1), 60), ratio: RATIO[ar] || (w && h ? `${w} / ${h}` : "16 / 9"), vertical: !!(w && h && h > w),
+           wh: w && h ? w / h : 16 / 9 }
 }
 
 /** One scene card with the real result: its clip (plays on hover; the newest plays by itself) or its still. */
-function SceneMedia({ sc, index, ratio, pending }: { sc: any; index: number; ratio: string; pending: boolean }) {
+function SceneMedia({ sc, index, ratio, pending, picked, onPick }: { sc: any; index: number; ratio: string; pending: boolean;
+                                                                   picked?: boolean; onPick?: () => void }) {
   const ref = useRef<HTMLVideoElement>(null)
   return (
-    <span className="vr-scene-media" style={{ aspectRatio: ratio }}>
+    <span className={`vr-scene-media ${onPick ? "pickable" : ""} ${picked ? "picked" : ""}`} style={{ aspectRatio: ratio }}
+      role={onPick ? "button" : undefined} tabIndex={onPick ? 0 : undefined} aria-pressed={onPick ? !!picked : undefined}
+      title={onPick ? `Play scene ${index + 1} in the big screen` : undefined} onClick={onPick}
+      onKeyDown={(e) => { if (onPick && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onPick() } }}>
       {sc.clip_url
         ? <video ref={ref} src={sc.clip_url} poster={sc.still_url || undefined} muted loop playsInline preload="metadata"
             onMouseEnter={() => ref.current?.play().catch(() => {})} onMouseLeave={() => ref.current?.pause()} />
@@ -1257,11 +1275,20 @@ function Stage({ run, onCancel, onText }: { run: Run; onCancel?: () => void; onT
   const madeStills = scenes.filter((x) => x?.still_url).length
   const preview = [...scenes].reverse().find((x) => x?.clip_url) || [...scenes].reverse().find((x) => x?.still_url)
   const shape = stageShape(run)
-  const names = plan.steps.map((s: any) => apps[s.app_id]?.name || s.app_id)
+  // A scene card the user clicked plays in the big screen (click it again, or "Back to the film", to return).
+  const [pickedAt, setPickedAt] = useState<number | null>(null)
+  // The finished film (or another run) always takes the big screen back from a picked scene.
+  useEffect(() => { setPickedAt(null) }, [run.id, url])
+  const picked = pickedAt != null && (scenes[pickedAt]?.clip_url || scenes[pickedAt]?.still_url) ? scenes[pickedAt] : null
+  // An explicit width: with only aspect-ratio + max-height the grid reserved less room than the screen drew, so the
+  // picture spilled behind the scene cards.
+  const screenStyle = shape.vertical ? { aspectRatio: shape.ratio }
+    : { aspectRatio: shape.ratio, width: `min(100%, calc(58vh * ${shape.wh.toFixed(4)}))` }
+  const names = plan.steps.map((s: any) => (s.handoff?.app_name || apps[s.app_id]?.name) || s.app_id)
   const steps = plan.steps.map((s: any) => ({ s, ex: run.execution?.[s.step_id] || {} }))
   const doneSteps = steps.filter(({ ex }: any) => ex.status === "succeeded").length
   const current = steps.find(({ ex }: any) => ex.status === "running")
-  const liveMsg = current?.ex.message?.replace(`${apps[current.s.app_id]?.name}: `, "")
+  const liveMsg = current?.ex.message?.replace(`${(current.s.handoff?.app_name || apps[current.s.app_id]?.name)}: `, "")
   const r = run.report
   const pct = working ? Math.round(((doneSteps + (current ? 0.5 : 0)) / Math.max(steps.length, 1)) * 100) : 100
   // The app's progress says "scene 4/13 …": the real total (the plan's count can differ) and how far it got.
@@ -1285,8 +1312,16 @@ function Stage({ run, onCancel, onText }: { run: Run; onCancel?: () => void; onT
       {last && textLayerOf(run, last) && onText && (!working || textBusy(run)) ? (
         <EditableVideo runId={run.id} stepId={last.step_id} layer={textLayerOf(run, last)} finalUrl={url}
           busy={textBusy(run)} onSave={(items) => onText(last.step_id, items)} fill />
-      ) : <div className={`vr-screen ${shape.vertical ? "vertical" : ""}`} style={{ aspectRatio: shape.ratio }}>
-        {url ? (
+      ) : <div className={`vr-screen ${shape.vertical ? "vertical" : ""}`} style={screenStyle}>
+        {picked ? (
+          <div className="vr-screen-live">
+            {picked.clip_url ? <video key={picked.clip_url} src={picked.clip_url} poster={picked.still_url || undefined} controls autoPlay playsInline />
+              : <img src={picked.still_url} alt={picked.title || `Scene ${(pickedAt ?? 0) + 1}`} />}
+            <button className="vr-ghost sm vr-screen-back" onClick={() => setPickedAt(null)}>
+              {`Scene ${(pickedAt ?? 0) + 1}${picked.clip_url ? "" : " (image)"} · Back to the film`}
+            </button>
+          </div>
+        ) : url ? (
           <video controls autoPlay muted playsInline preload="metadata" src={url} />
         ) : working && (preview || live.presenter_url) ? (
           <div className="vr-screen-live">
@@ -1324,7 +1359,8 @@ function Stage({ run, onCancel, onText }: { run: Run; onCancel?: () => void; onT
             return (
               <figure key={i} className="vr-scene">
                 {sc?.clip_url || sc?.still_url
-                  ? <SceneMedia sc={sc} index={i} ratio={shape.ratio} pending={working && !sc.clip_url} />
+                  ? <SceneMedia sc={sc} index={i} ratio={shape.ratio} pending={working && !sc.clip_url} picked={pickedAt === i}
+                      onPick={() => setPickedAt(pickedAt === i ? null : i)} />
                   : <span className={`vr-scene-skel ${working ? "vr-skeleton" : ""} ${working && i + 1 < sceneNow ? "made" : ""}`} style={{ aspectRatio: shape.ratio, animationDelay: `${i * 0.12}s` }}>
                       {working && i + 1 < sceneNow && <span className="vr-scene-mark" aria-label="Made">{I.check}</span>}
                       {working && i + 1 === sceneNow && <span className="vr-spin" aria-label="Making now" />}
@@ -1341,7 +1377,7 @@ function Stage({ run, onCancel, onText }: { run: Run; onCancel?: () => void; onT
 
       <ul className="vr-stage-steps">
         {steps.map(({ s, ex }: any) => (
-          <li key={s.step_id}><StatusDot status={ex.status || "planned"} />{apps[s.app_id]?.name || s.app_id}<span>{statusLabel(ex.status || "planned", t)}{ex.mock && ex.status === "succeeded" ? t("plan.simulatedSuffix") : ""}</span></li>
+          <li key={s.step_id}><StatusDot status={ex.status || "planned"} />{(s.handoff?.app_name || apps[s.app_id]?.name) || s.app_id}<span>{statusLabel(ex.status || "planned", t)}{ex.mock && ex.status === "succeeded" ? t("plan.simulatedSuffix") : ""}</span></li>
         ))}
       </ul>
     </aside>

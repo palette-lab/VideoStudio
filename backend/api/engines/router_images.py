@@ -131,14 +131,14 @@ async def generate(prompt: str, aspect: str = "16:9", refs: list[str] | None = N
         for model in models:
             try:
                 url = await _one(client, path, _body(prompt, model, aspect, refs))
+                if dest is not None:  # a picture that cannot be fetched counts as this model failing: try the next
+                    r = await client.get(url, follow_redirects=True)
+                    r.raise_for_status()
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(r.content)
             except (RouterImageError, httpx.HTTPError) as e:
                 problems.append(str(e)[:200])
                 log.warning("router image on %s failed: %s", model, e)
                 continue
-            if dest is not None:
-                r = await client.get(url, follow_redirects=True)
-                r.raise_for_status()
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(r.content)
             return url
     raise RouterImageError("no router image model made the picture: " + " | ".join(problems))

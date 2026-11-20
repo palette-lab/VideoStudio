@@ -19,6 +19,16 @@ PRODUCTION = {"children_story": ["animation", "narrative"], "fiction": ["narrati
               "short_drama": ["narrative"], "other": ["narrative"]}
 
 
+def _code_motion(intel: dict) -> bool:
+    from .. import story_engine
+    return story_engine.code_motion("motion_graphics", intel.get("motion_engine"))
+
+
+def _app_name(app: dict, intel: dict, motion: bool) -> str:
+    from .. import story_engine
+    return story_engine.OPUS_MOTION_NAME if motion and _code_motion(intel) else app["name"]
+
+
 def applies(run: dict) -> bool:
     """A written film, no footage of the user's to edit, and no app mode that needs a different engine."""
     intel = run.get("story_intel") or {}
@@ -53,12 +63,15 @@ def build(run: dict) -> dict:
              f"above win wherever they differ):\n{run.get('enhanced_prompt') or ''}")
     what = ("Render the approved full-3D motion graphics film" if motion else "Film the approved story")
     step = {"step_id": "s1", "app_id": app_id, "subtask_ids": ["t_film"], "capabilities_used": caps,
-            "responsibility": f"{what}: {len(scenes)} scenes, keyframe images -> AI clips (each AI-checked), "
-                              "narration, music and finishing - exactly as planned and approved.",
+            "responsibility": f"{what}: {len(scenes)} scenes, keyframe images -> "
+                              + ("each keyframe animated in code from an LLM motion plan (no video model), "
+                                 "narration, sound effects" if motion and _code_motion(intel)
+                                 else "AI clips (each AI-checked), narration, music")
+                              + " and finishing - exactly as planned and approved.",
             "inputs": [{"source": "prompt", "format": "text"}]
                       + [{"source": f"asset:{aid}", "format": "image_file"} for aid in images],
             "outputs": ["video_file"],
-            "handoff": {"app_id": app_id, "app_name": app["name"], "prompt": brief,
+            "handoff": {"app_id": app_id, "app_name": _app_name(app, intel, motion), "prompt": brief,
                         "language": cls.get("language") or "en", "endpoint": "",
                         "request": {"prompt": brief, "duration": dur, "total_duration": dur, "duration_given": True,
                                     "aspect_ratio": ar, "scenes": len(scenes), "production_type": production,

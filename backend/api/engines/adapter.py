@@ -177,6 +177,16 @@ class EngineAdapter:
                 intel = (run or {}).get("story_intel") or {}
                 if (intel.get("plan") or {}).get("scenes") and not extra:  # the approved (and edited) story
                     extra["_story"] = intel
+                # One resume folder per run + step + plan revision (request_id is "<run>-<step>-<attempt>"): a Retry
+                # can reuse what the failed attempt already made; an edited, re-approved plan starts fresh.
+                extra["_resume"] = str(config.STORAGE / "renders" / (
+                    f"{request_id.rsplit('-', 1)[0]}-r{(run or {}).get('plan_revision', 0)}-resume"))
+                # Progress is always saved there, but only a Retry of this step (the user's click) reads it back;
+                # any other start (a new approval, another app) begins from the beginning.
+                retry = (run or {}).get("retry_steps") or []
+                extra["_resume_load"] = step["step_id"] in retry
+                if step["step_id"] in retry:
+                    retry.remove(step["step_id"])
                 out = await story_engine.run(app, {**(step.get("handoff") or {"prompt": "", "request": {}}),
                                                    "graphics": "palette-motion-studio" not in later,
                                                    "effects": "palette-effects-studio" not in later, **extra},

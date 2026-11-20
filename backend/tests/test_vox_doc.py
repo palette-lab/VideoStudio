@@ -24,9 +24,18 @@ def test_sentences_keep_abbreviations_together():
     assert v.sentences("Dr. Smith sailed. It sank!\n\nThe end?") == ["Dr. Smith sailed.", "It sank!", "The end?"]
 
 
-def test_lengths_snap_to_the_playbook():
-    assert v.minutes_for(90) == 1 and v.minutes_for(330) == 5 and v.minutes_for(None) is None
+def test_the_picked_length_is_used_exactly():
+    assert v.minutes_for(30) == 0.5 and v.minutes_for(90) == 1.5 and v.minutes_for(None) is None
+    assert v.minutes_for("") is None and v.minutes_for(0) is None
     assert v.minutes_of("8 Minutes") == 8 and v.minutes_of("3 Minutes") is None
+    assert v.length_label(0.5) == "30 seconds" and v.length_label(1) == "1 Minute" and v.length_label(5) == "5 Minutes"
+    assert v.word_range(5) == v.LENGTHS[5] and v.word_range(0.5) == (70, 85)
+
+
+def test_a_length_in_the_prompt_is_read():
+    assert v.minutes_in_prompt("a 5-minute documentary on tea") == 5
+    assert v.minutes_in_prompt("90 seconds about rome") == 1.5
+    assert v.minutes_in_prompt("a documentary on the moon") is None
 
 
 def test_the_finished_picture_is_held_before_the_transition():
@@ -95,8 +104,9 @@ def test_one_documentary_mode_a_topic_or_a_file():
     assert xr.wanted(upload) and not v.wanted(upload)
 
 
-def test_a_named_model_that_is_switched_off_fails_fast(monkeypatch):
-    """Opus asked for by name and not enabled for the key: one request, then an error (the caller falls back)."""
+def test_a_named_model_that_is_switched_off_falls_back_to_the_chain(monkeypatch):
+    """Opus asked for by name and not enabled for the key: one request to it, then the palette-llm-max chain (which
+    here is off too, so the call still ends in an LLMError after its own attempts)."""
     import httpx
     from router_core import config, llm
     posts = []
@@ -119,7 +129,8 @@ def test_a_named_model_that_is_switched_off_fails_fast(monkeypatch):
             raise AssertionError("should fail")
         except llm.LLMError:
             pass
-    assert posts == ["anthropic/claude-opus-5.5"]  # the second call does not even ask: it is known to be off
+    # Opus is asked once; after that it is known to be off and every attempt goes to palette-llm-max
+    assert posts == ["anthropic/claude-opus-5.5"] + ["palette-llm-max"] * 4
 
 
 def test_a_script_too_long_for_its_duration_is_shortened(monkeypatch):

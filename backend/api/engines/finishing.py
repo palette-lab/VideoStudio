@@ -20,7 +20,7 @@ from pathlib import Path
 
 from router_core import config, llm
 
-from . import motion_design, motion_engine
+from . import lang, motion_design, motion_engine
 from .vendor.flow import video_merge
 
 log = logging.getLogger("palette_video.engines")
@@ -185,7 +185,8 @@ kinetic key words synced to the speech, spec badges only from the brief) and the
 
 
 async def direct(brief: str, plan: dict, timings: list[tuple[float, float]], frames: list[Path],
-                 narration: list[str], busy: list | None = None, level: str = "", captions: str | None = None) -> dict:
+                 narration: list[str], busy: list | None = None, level: str = "", captions: str | None = None,
+                 language: str | None = None) -> dict:
     scenes = []
     for i, (s, (a, b)) in enumerate(zip(plan["scenes"], timings)):
         scenes.append({"scene": i + 1, "start": a, "end": b, "title": s.get("title"), "beat": s.get("beat"),
@@ -208,6 +209,8 @@ async def direct(brief: str, plan: dict, timings: list[tuple[float, float]], fra
     content += [llm.image_part(f) for f in frames if f.exists()]
     sig = motion_design.pick_signature(info.get("treatment_hint"))
     rules = {"full": FULL_RULES, "clean": CLEAN_RULES}.get(level, "") + motion_design.signature_rules(sig)
+    words = (brief or "").split("\n\nDetailed version")[0]  # the user's own words decide the language
+    rules += lang.rule(lang.detect(words, language))
     messages = [{"role": "system", "content": DIRECTOR_SYSTEM + motion_design.director_rules() + rules},
                 {"role": "user", "content": content}]
     gp = await llm.chat_json(config.DEEP_VISION_MODEL, messages, max_tokens=12000, stage="engine.graphics_director")
@@ -377,6 +380,29 @@ def motion_brief(gp: dict, total: float, plan: dict) -> str:
     return "\n".join(lines)
 
 
+def graphic_times(gp: dict, total: float) -> list[tuple[float, float]]:
+    """When each planned graphic is on screen: hook, overlays, accents (short) and the end card (to the end)."""
+    out = []
+    for item in [gp.get("hook") or {}, *(gp.get("overlays") or [])]:
+        try:
+            out.append((float(item.get("start", 0.2 if item is gp.get("hook") else 0)), float(item.get("end"))))
+        except (TypeError, ValueError):
+            continue
+    for a in gp.get("accents") or []:
+        try:
+            at = float(a.get("at"))
+            out.append((at - 0.2, at + 0.8))
+        except (TypeError, ValueError):
+            continue
+    e = gp.get("end_card") or {}
+    if e.get("title"):
+        try:
+            out.append((float(e.get("start", max(0.0, total - 4))), total))
+        except (TypeError, ValueError):
+            out.append((max(0.0, total - 4), total))
+    return out
+
+
 def review_times(gp: dict) -> list[float]:
     """Moments to check for overlapping text: just after each piece of text starts animating in, and once settled."""
     ts = []
@@ -416,7 +442,11 @@ async def run(app: dict, brief: str, plan: dict, video: str, scene_paths: list[s
         await progress(f"{app['name']}: no graphics needed ({str(gp.get('why') or '')[:160]})")
         return {"path": video, "skipped": True, "why": gp.get("why") or "", "graphics": gp, "invented_specs": []}
     total = await _probe(ffmpeg, video)
-    handoff = {"prompt": motion_brief(gp, total, plan), "request": {"aspect_ratio": aspect_ratio},
+    spans = motion_engine.graphic_spans(graphic_times(gp, total), total)
+    brief_text = motion_brief(gp, total, plan) + (
+        "\nDraw NOTHING outside the timed moments above (no grade, vignette, grain, frame or logo that stays on): "
+        "between them the frame is exactly the footage." if spans else "")
+    handoff = {"prompt": brief_text, "request": {"aspect_ratio": aspect_ratio}, "render_spans": spans,
                "review_times": review_times(gp), "required_texts": required_texts(gp)}
     out = await motion_engine.run({**app, "name": f"{app['name']} graphics"}, handoff, {}, video, work, progress,
                                   quality, ["motion.overlay_graphics"])
@@ -439,7 +469,8 @@ async def plan_graphics(app: dict, brief: str, plan: dict, video: str, scene_pat
                                           else "planning the motion design: hook, callouts and labels"))
     timings = await scene_timings(ffmpeg, scene_paths)
     frames = await scene_frames(ffmpeg, scene_paths, work / "frames")
-    gp = apply_level(await direct(brief, plan, timings, frames, narration, busy, level, captions), level)
+    gp = apply_level(await direct(brief, plan, timings, frames, narration, busy, level, captions,
+                                     plan.get("language")), level)
     if captions:  # the captions own the lower band: no lower thirds on top of them
         from . import effects_engine
         gp["overlays"] = [o for o in gp.get("overlays") or [] if o.get("kind") != "lower_third"]

@@ -158,11 +158,29 @@ def test_refused_clip_falls_back_to_the_next_model(monkeypatch):
     url, used = asyncio.run(story_engine._clip({"app_id": "pltt-flow-video-2", "name": "App"}, 0, 1,
                                                {"duration": 5, "image_prompt": "girl", "camera": "push-in"},
                                                "https://s.png", "9:16", story_engine.QUALITY["test"], "k", progress))
-    assert used == "kling_3_0_standard" and url.endswith("k.mp4")
-    assert calls == [("seedance_2_0", "480p"), ("kling_3_0_standard", None)]
+    assert used == "kling_4_0" and url.endswith("k.mp4")
+    assert calls == [("seedance_2_0", "480p"), ("kling_4_0", "720p")]  # Kling 4.0 only takes 720p / 1080p
 
 
-def test_other_provider_errors_are_not_retried(monkeypatch):
+def test_a_failing_clip_model_falls_back_down_the_whole_chain(monkeypatch):
+    calls = []
+
+    def flaky(key, model, prompt, **kw):
+        calls.append(model)
+        if model != "kling_3_0_standard":
+            raise RuntimeError("502 bad gateway")
+        return {"video": {"url": "https://fal.media/k.mp4"}}
+
+    async def progress(m):
+        pass
+
+    monkeypatch.setattr(story_engine.fal_helper, "generate_video", flaky)
+    url, used = asyncio.run(story_engine._clip({"app_id": "x", "name": "App"}, 0, 1, {"duration": 5, "image_prompt": "a"},
+                                               "https://s.png", "16:9", story_engine.QUALITY["test"], "k", progress))
+    assert used == "kling_3_0_standard" and calls == ["seedance_2_0", "kling_4_0", "kling_3_0_standard"]
+
+
+def test_every_clip_model_failing_is_reported(monkeypatch):
     def boom(key, model, prompt, **kw):
         raise RuntimeError("502 bad gateway")
 
@@ -170,7 +188,7 @@ def test_other_provider_errors_are_not_retried(monkeypatch):
         pass
 
     monkeypatch.setattr(story_engine.fal_helper, "generate_video", boom)
-    with pytest.raises(RuntimeError, match="502"):
+    with pytest.raises(story_engine.EngineError, match="502"):
         asyncio.run(story_engine._clip({"app_id": "x", "name": "App"}, 0, 1, {"duration": 5, "image_prompt": "a"},
                                        "https://s.png", "16:9", story_engine.QUALITY["test"], "k", progress))
 
@@ -537,3 +555,13 @@ def test_places_are_drawn_first_and_every_scene_is_drawn_inside_its_place(tmp_pa
     assert len(edits) == 1 and "plain navy pyjamas instead of striped" in edits[0][0]
     assert edits[0][1][0].startswith("https://fal.media/still") and "https://fal.media/plate_L" in edits[0][1][-1]
     assert [l["name"] for l in out["plan"]["locations"]] == ["attic bedroom", "forest"]
+
+
+def test_3d_motion_on_the_video_model_films_on_seedance_2_0_first(monkeypatch):
+    monkeypatch.setenv("PALETTE_VIDEO_QUALITY", "full")
+    q = story_engine.quality("motion_graphics", "video_model")
+    assert story_engine.clip_models(q) == ["seedance_2_0", "kling_4_0", "kling_3_0_pro"]
+    assert story_engine.quality("motion_graphics", "opus_llm")["video_model"] == "kling_4_0"  # no clips: unchanged
+    assert story_engine.clip_models(story_engine.quality("short_drama")) == ["kling_4_0", "seedance_2_0", "kling_3_0_pro"]
+    assert story_engine.clip_resolution("kling_4_0", {"resolution": "480p"}) == "720p"
+    assert story_engine.clip_resolution("kling_3_0_pro", {"resolution": "720p"}) is None

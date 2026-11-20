@@ -420,21 +420,27 @@
 .vr-chat-col { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .vr-chat.split { max-width: none; display: grid; grid-template-columns: minmax(300px, 3fr) 7fr; gap: 22px; align-items: start;
   height: calc(100vh - 110px); min-height: 0; margin-top: 14px; }
-.vr-chat.split .vr-chat-col { height: 100%; overflow-y: auto; overscroll-behavior: contain; padding-right: 6px; scrollbar-width: thin; }
-.vr-chat.split .vr-thread { padding-top: 6px; gap: 18px; }
+.vr-chat.split .vr-chat-col { height: 100%; min-height: 0; overflow: hidden; }
+/* only the messages scroll; the scrollbar ends where the chat box starts, so nothing slides behind it */
+.vr-chat.split .vr-thread { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 6px 6px 12px 0; gap: 18px; scrollbar-width: thin; }
+.vr-chat.split .vr-dock { position: static; flex: none; padding-right: 6px; }
 .vr-chat.split .vr-avatar { display: none; }
 .vr-chat.split .vr-bubble { max-width: 92%; }
 .vr-chat.split .vr-box.dock .vr-mode { display: none; }
 .vr-chat.split .vr-dock-foot { display: none; }
 .vr-chat.split .vr-facts { grid-template-columns: 1fr 1fr; }
 
-.vr-stage { height: 100%; overflow-y: auto; display: grid; align-content: start; gap: 16px; padding: 18px 20px 20px; border-radius: 26px;
+.vr-stage { height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding: 18px 20px 20px; border-radius: 26px;
   background: var(--glass); border: 1px solid var(--glass-line); box-shadow: var(--shadow);
   backdrop-filter: blur(22px) saturate(140%); -webkit-backdrop-filter: blur(22px) saturate(140%); }
+/* a plain column, not a grid: in a grid the screen's row was sized before its width was known (aspect-ratio +
+   min(100%, ...)), so the picture spilled behind the scene cards. Nothing in the column may shrink. */
+.vr-stage > * { flex: none; min-width: 0; }
 .vr-stage-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
 .vr-stage-head h2 { font-size: clamp(18px, 1.8vw, 24px); font-weight: 650; letter-spacing: -.02em; line-height: 1.2; margin-top: 4px; }
 .vr-stage-kicker { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
-.vr-screen { position: relative; width: 100%; max-height: 58vh; margin: 0 auto; border-radius: 20px; overflow: hidden; background: rgba(20, 18, 16, .06); border: 1px solid var(--glass-line); }
+.vr-screen { position: relative; width: 100%; max-height: 58vh; margin: 0 auto; flex: none; min-height: 0; border-radius: 20px; overflow: hidden; background: rgba(20, 18, 16, .06); border: 1px solid var(--glass-line); }
 .vr-screen.vertical { width: auto; height: 58vh; }
 .vr-screen video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
 .vr-screen-skel { position: absolute; inset: 0; display: grid; place-items: center; }
@@ -460,6 +466,8 @@
 @media (max-width: 960px) {
   .vr-chat.split { display: flex; flex-direction: column-reverse; height: auto; }
   .vr-chat.split .vr-chat-col { height: auto; overflow: visible; }
+  .vr-chat.split .vr-thread { overflow: visible; }
+  .vr-chat.split .vr-dock { position: sticky; }
   .vr-stage { height: auto; }
   .vr-screen.vertical { height: 50vh; }
 }
@@ -498,6 +506,12 @@
 .vr-screen-info.overlay .sm { opacity: .8; font-size: 12px; }
 .vr-scene-media { position: relative; display: block; width: 100%; border-radius: 14px; overflow: hidden; background: var(--chip); border: 1px solid var(--glass-line); }
 .vr-scene-media img, .vr-scene-media video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.vr-scene-media.pickable { cursor: pointer; transition: transform .15s ease, box-shadow .15s ease; }
+.vr-scene-media.pickable:hover { transform: translateY(-2px); }
+.vr-scene-media.pickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.vr-scene-media.picked { box-shadow: 0 0 0 3px var(--accent); }
+.vr-screen-live video[controls] { object-fit: contain; }
+.vr-screen-back { position: absolute; top: 12px; left: 12px; z-index: 2; background: var(--glass-strong); }
 .vr-scene-pending { position: absolute; right: 6px; bottom: 6px; display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px;
   border-radius: 999px; background: rgba(0, 0, 0, .6); color: #fff; font-size: 11px; font-weight: 600; }
 .vr-scene-pending .vr-spin { width: 10px; height: 10px; }

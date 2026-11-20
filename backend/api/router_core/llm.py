@@ -27,9 +27,17 @@ class LLMError(RuntimeError):
     pass
 
 
+class LLMReplyError(LLMError, ValueError):
+    """The model answered, but not with a JSON object. Both an LLMError (callers' fallbacks) and a ValueError."""
+
+
+_MIME = {".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
 def image_part(path: str | Path) -> dict:
+    mime = _MIME.get(Path(path).suffix.lower(), "image/jpeg")
     data = base64.b64encode(Path(path).read_bytes()).decode()
-    return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{data}"}}
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}
 
 
 def _extract_json(text: str) -> dict:
@@ -38,12 +46,18 @@ def _extract_json(text: str) -> dict:
     if fenced:
         text = fenced.group(1).strip()
     try:
-        return json.loads(text)
+        data = json.loads(text)
     except json.JSONDecodeError:
         start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end > start:
-            return json.loads(text[start : end + 1])
-        raise
+        try:
+            data = json.loads(text[start : end + 1]) if start != -1 and end > start else None
+        except json.JSONDecodeError:
+            data = None
+        if data is None:
+            raise LLMReplyError(f"the model did not return JSON: {text[:160]!r}") from None
+    if not isinstance(data, dict):
+        raise LLMReplyError(f"the model returned {type(data).__name__}, not a JSON object")
+    return data
 
 
 # Model chain (PALETTE_LLM_MODEL, comma-separated, e.g. "anthropic/claude-opus-5.5, palette-llm"): the first model
@@ -61,11 +75,11 @@ def chain() -> list[str]:
 
 
 def pick_model(model: str, skip: set[str] | frozenset = frozenset()) -> str:
-    if model != UPGRADE_FROM:  # a model asked for by name: there is no chain to move along, so fail fast
-        if model in skip or _down_until.get(model, 0) > time.time():
-            raise LLMError(f"{model} is not available for this key")
-        return model
     now = time.time()
+    if model != UPGRADE_FROM:  # a model asked for by name (e.g. Opus for motion): the reasoning chain when it is off
+        if model not in skip and _down_until.get(model, 0) <= now:
+            return model
+        log.warning("%s is not available for this key; using the %s chain", model, UPGRADE_FROM)
     return next((m for m in chain() if m not in skip and _down_until.get(m, 0) <= now), UPGRADE_FROM)
 
 
@@ -76,8 +90,8 @@ def _unavailable(status: int, text: str) -> bool:
 
 
 def _vendor_failed(used: str, status: int, text: str) -> bool:
-    """True (and that model is skipped for a while) when a chain model other than the last resort is not usable."""
-    if used == UPGRADE_FROM or used not in chain() or not _unavailable(status, text):
+    """True (and that model is skipped for a while) when a model other than the last resort is not usable."""
+    if used == UPGRADE_FROM or not _unavailable(status, text):
         return False
     _down_until[used] = time.time() + VENDOR_RETRY_S
     log.warning("%s is not available for this key (%s); trying the next model for %s s", used, text[:160],
@@ -143,7 +157,7 @@ async def chat_json(model: str, messages: list[dict], max_tokens: int = 6000, re
         started = time.monotonic()
         used = body["model"] = pick_model(model, skip)
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=20)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(config.LLM_TIMEOUT_S, connect=20)) as client:
                 r = await client.post(
                     f"{config.LLM_BASE_URL}/v1/chat/completions",
                     headers={"Authorization": f"Bearer {config.LLM_API_KEY}"},
@@ -185,7 +199,7 @@ async def chat_text(model: str, messages: list[dict], max_tokens: int = 24000, r
         started = time.monotonic()
         used = body["model"] = pick_model(model, skip)
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=20)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(config.LLM_TIMEOUT_S, connect=20)) as client:
                 r = await client.post(f"{config.LLM_BASE_URL}/v1/chat/completions",
                                       headers={"Authorization": f"Bearer {config.LLM_API_KEY}"}, json=body)
             if r.status_code != 200 and _vendor_failed(used, r.status_code, r.text):
@@ -211,16 +225,17 @@ async def chat_text(model: str, messages: list[dict], max_tokens: int = 24000, r
     raise LLMError(f"LLM call failed: {last_err}")
 
 
-async def transcribe(path: str | Path) -> dict:
+async def transcribe(path: str | Path, language: str | None = None) -> dict:
+    """Speech to text. `language` (ISO 639-1, e.g. "en" / "ko") stops the model guessing - and translating."""
     if not config.LLM_API_KEY:
         raise LLMError("PALETTE_API_KEY is not set in .env")
     started = time.monotonic()
-    async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=20)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(config.STT_TIMEOUT_S, connect=20)) as client:
         with open(path, "rb") as f:
             r = await client.post(
                 f"{config.LLM_BASE_URL}/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {config.LLM_API_KEY}"},
-                data={"model": config.STT_MODEL},
+                data={"model": config.STT_MODEL, **({"language": language} if language else {})},
                 files={"file": (Path(path).name, f)},
             )
     ok = r.status_code == 200

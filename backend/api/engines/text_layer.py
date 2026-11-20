@@ -18,7 +18,7 @@ import re
 import shutil
 from pathlib import Path
 
-from . import motion_engine
+from . import lang, motion_engine
 
 KINDS = ("hook", "title", "keyword", "callout", "label", "lower_third", "badge", "step", "end_title", "end_line", "cta",
          "caption")
@@ -310,7 +310,7 @@ def from_graphics(gp: dict, duration: float, accent: str = "#FFD84D", style: str
     if hook.get("text"):
         a = _clamp(hook.get("start"), 0, duration, 0.2)
         e = _clamp(hook.get("end"), a + MIN_S, duration, min(duration, a + 2.6))
-        out.append(item("hook", str(hook["text"]), a, e, 50, 18, 86, 9, "#FFFFFF", style, "display", "pop", n=n))
+        out.append(item("hook", str(hook["text"]), a, e, 50, 18, 86, 4.5, "#FFFFFF", style, "display", "pop", n=n))
         n += 1
         # (the hook's sub-line is left out: fewer words on screen)
     low = captions_band[0] if captions_band else 100
@@ -340,7 +340,7 @@ def from_graphics(gp: dict, duration: float, accent: str = "#FFD84D", style: str
     card = gp.get("end_card") or {}
     if card.get("title"):
         a = _clamp(card.get("start"), 0, max(0.0, duration - MIN_S), max(0.0, duration - 3))
-        out.append(item("end_title", str(card["title"]), a, duration, 50, 42, 84, 8, "#FFFFFF", style, n=n))
+        out.append(item("end_title", str(card["title"]), a, duration, 50, 42, 84, 4.5, "#FFFFFF", style, n=n))
         n += 1
         for k, y in (("cta", 60),):  # the title and its call to action; no extra line
             if card.get(k):
@@ -359,7 +359,7 @@ def from_scene_words(scenes: list[dict], spans: list[tuple[float, float]], style
         words = str(s.get("overlay_text") or "").strip()
         if words:
             out.append(item("keyword", words, round(a + 0.3, 2), round(max(b - 0.2, a + 0.3 + MIN_S), 2), 50, 30,
-                            84, 9, color, style, "display", "pop", n=200 + i))
+                            84, 4.5, color, style, "display", "pop", n=200 + i))
     return out
 
 
@@ -541,15 +541,20 @@ async def finish(app: dict, brief: str, plan: dict, video: str, scene_paths: lis
         try:
             effects = await effects_engine.run({**app, "name": f"{name} effects"},
                                                {"prompt": brief, "effects_style": effects_style, "text_free": True,
-                                                "allow_none": True}, video, work / "effects", progress)
+                                                "allow_none": True, "language": plan.get("language")},
+                                               video, work / "effects", progress)
             clean, segs = effects["path"], effects.get("transcript")
         except Exception as e:  # camera moves are a finishing touch
             effects = {"error": str(e)[:300], "plan": []}
     if segs is None and captions_on:
         try:
-            segs = await effects_engine.transcript(clean, work)
+            segs = await effects_engine.transcript(clean, work, plan.get("language"))
         except Exception:
             segs = []
+    if segs and not lang.matches(" ".join(g["text"] for g in segs), plan.get("language")):
+        # the speech-to-text heard another language (or translated): caption the script itself, scene by scene
+        segs = [{"start": a, "end": b, "text": str(line).strip()}
+                for line, (a, b) in zip(narration or [], spans or []) if str(line or "").strip()]
     ff = video_merge.find_ffmpeg()
     dur = await asyncio.to_thread(video_merge.probe_duration, ff, clean)
     size = await motion_engine._frame_size(clean)
@@ -567,6 +572,7 @@ async def finish(app: dict, brief: str, plan: dict, video: str, scene_paths: lis
         except Exception as e:
             graphics = {"error": str(e)[:300]}
     words = from_scene_words(scene_words, spans, style=words_style) if scene_words and spans else []
+    words = [w for w in words if lang.matches(w["text"], plan.get("language"))]  # never a second language
     items = from_graphics(gp, dur, captions_band=band if captions_on and segs else None,
                           words_owned=bool(words)) if gp else []
     items += words

@@ -113,4 +113,169 @@ def test_the_clip_check_sees_the_characters(monkeypatch):
                                                           for k in range(3)])
     assert asyncio.run(se.clip_issues("c.mp4", {"title": "x"}, cast=[{"name": "Mira", "passport": "p1"}])) == []
     urls = [x["image_url"]["url"] for x in seen["parts"] if x["type"] == "image_url"]
-    assert urls == ["f0", "f1", "f2", "p1"] and "CHARACTER REFERENCES (Mira)" in seen["parts"][0]["text"]
+    assert urls == ["f0", "f1", "f2", "p1"] and "in order: Mira (face)" in seen["parts"][0]["text"]
+    # with a full-body view the check also sees the outfit (dress colour, footwear), not only the face
+    asyncio.run(se.clip_issues("c.mp4", {"title": "x"}, cast=[{"name": "Mira", "passport": "p1", "front": "f1x"}]))
+    urls = [x["image_url"]["url"] for x in seen["parts"] if x["type"] == "image_url"]
+    assert urls[-2:] == ["p1", "f1x"] and "Mira (full outfit)" in seen["parts"][0]["text"]
+    assert "outfit (garments, colours" in seen["parts"][0]["text"]
+
+
+# --- Seedance reference mode: the clip model sees the character sheets, not only the scene's still ------------------
+
+MIRA = {"name": "Mira", "passport": "p1", "front": "f1", "back": "b1"}
+
+
+def test_seedance_gets_the_still_and_the_character_sheets_as_references():
+    urls, note = se.clip_references("seedance_2_0", "still", [MIRA, {"name": "", "photo": "u", "passport": "p2"}])
+    assert urls == ["still", "p1", "f1", "b1", "p2"]
+    assert note.startswith("@Image1 is the opening frame") and "@Image2-@Image4 are Mira" in note
+    assert "@Image5 is the person" in note and "never a costume or hair change" in note
+    assert se.clip_references("kling_3_0_pro", "still", [MIRA]) == ([], "")  # Kling uses elements instead
+    assert se.clip_references("seedance_2_0", "still", []) == ([], "")
+    many, _ = se.clip_references("seedance_2_0", "still", [MIRA] * 5)
+    assert len(many) <= 9  # the endpoint's limit
+
+
+def _clip_call(monkeypatch, model, fail_refs=False):
+    calls = []
+
+    async def fake_fal(fn, key, m, prompt, **kw):
+        calls.append({"prompt": prompt, **kw})
+        if fail_refs and kw.get("image_references"):
+            raise RuntimeError("500 upstream error")
+        return {"video": {"url": "v.mp4"}}
+
+    async def progress(_):
+        pass
+    monkeypatch.setattr(se, "_fal", fake_fal)
+    monkeypatch.setattr(se, "_motion", lambda *a, **k: "she walks")
+    s = {"duration": 5}
+    q = {"video_model": model, "fallbacks": [], "resolution": "480p", "audio": False}
+    out = asyncio.run(se._clip({"name": "t", "app_id": "a"}, 0, 1, s, "still", "9:16", q, "k", progress,
+                               end="end", cast=[MIRA]))
+    return out, calls, s
+
+
+def test_a_seedance_clip_with_characters_uses_reference_mode(monkeypatch):
+    out, calls, s = _clip_call(monkeypatch, "seedance_2_0")
+    assert out == ("v.mp4", "seedance_2_0") and len(calls) == 1 and s["clip_refs"] == 4
+    c = calls[0]
+    assert c["image_references"] == ["still", "p1", "f1", "b1"] and "start_image" not in c and "end_image" not in c
+    assert c["prompt"].startswith("@Image1 is the opening frame") and c["prompt"].endswith("she walks")
+    from engines.vendor.flow import fal_helper
+    mid, fields = fal_helper.video_request("seedance_2_0", prompt="x", image_references=c["image_references"],
+                                           resolution="480p", duration="5")
+    assert mid == "bytedance/seedance-2.0/fast/reference-to-video" and fields["image_urls"][0] == "still"
+
+
+def test_a_failed_reference_clip_falls_back_to_the_plain_image_to_video(monkeypatch):
+    out, calls, s = _clip_call(monkeypatch, "seedance_2_0", fail_refs=True)
+    assert out == ("v.mp4", "seedance_2_0") and len(calls) == 2 and "clip_refs" not in s
+    assert calls[1]["start_image"] == "still" and calls[1]["end_image"] == "end" and calls[1]["prompt"] == "she walks"
+
+
+def test_kling_4_still_gets_a_plain_clip(monkeypatch):
+    out, calls, _ = _clip_call(monkeypatch, "kling_4_0")
+    assert len(calls) == 1 and "image_references" not in calls[0] and "elements" not in calls[0]
+
+
+def test_a_failed_check_is_retried_then_marked_unchecked(monkeypatch):
+    n = {"calls": 0}
+
+    async def boom(*a, **k):
+        n["calls"] += 1
+        raise RuntimeError("gateway 502")
+    monkeypatch.setattr(se.llm, "chat_json", boom)
+    s = {}
+    assert asyncio.run(se.consistency_issues(["p1"], "still", {}, note=s)) == []
+    assert n["calls"] == 2 and s["qa_unchecked"] == ["consistency"]
+
+
+def test_an_animal_lead_gets_its_references_without_being_named():
+    cast = [{"name": "Rusty"}]
+    assert se.scene_cast({"image_prompt": "a red fox sniffs the snow"}, cast) == cast
+    assert se.scene_cast({"image_prompt": "the bottle and its label on a table"}, cast) == []
+
+
+def test_a_rerender_keeps_the_film_cast(monkeypatch, tmp_path):
+    seen = []
+
+    async def fake_fal(fn, key, m, prompt, **kw):
+        seen.append((fn.__name__, prompt, kw))
+        return {"images": [{"url": "new_still"}]} if fn.__name__ == "generate_image" else {"video": {"url": "v.mp4"}}
+
+    async def no_issues(*a, **k):
+        return []
+
+    async def dl(url, dest):
+        return str(dest)
+
+    async def progress(_):
+        pass
+    monkeypatch.setattr(se, "_fal", fake_fal)
+    monkeypatch.setattr(se, "consistency_issues", no_issues)
+    monkeypatch.setattr(se, "scene_issues", no_issues)
+    monkeypatch.setattr(se, "clip_issues", no_issues)
+    monkeypatch.setattr(se, "_download", dl)
+    monkeypatch.setattr(se, "splice", lambda film, clip, a, b, out: out)
+    monkeypatch.setattr(se, "fal_key", lambda: "k")
+    out = {"path": "film.mp4", "spans": [[0, 5]], "aspect_ratio": "9:16", "clip_models": ["seedance_2_0"],
+           "plan": {"cast": [{"name": "Mira", "desc": "Mira: red braids, yellow raincoat", **{k: MIRA[k] for k in
+                                                                                             ("passport", "front", "back")}}]},
+           "scenes": [{"title": "Mira jumps in a puddle", "image_prompt": "Mira jumps in a puddle", "still_url": "old"}]}
+    asyncio.run(se.rerender_scene(out, 1, "", tmp_path, progress))
+    img = next(kw for fn, _, kw in seen if fn == "generate_image")
+    vid = next(kw for fn, _, kw in seen if fn == "generate_video")
+    assert img["image_urls"][:3] == ["p1", "f1", "b1"]
+    assert vid["image_references"] == ["new_still", "p1", "f1", "b1"]
+
+
+# --- the Meera / Arjun drama: one blended "person" sheet, faces changed between scenes ------------------------------
+
+FLAT = ("Meera: 28-year-old Indian woman, oval face, long black hair in a neat low bun, red silk saree with a gold "
+        "border. Arjun: 30-year-old Indian man, light trimmed beard, short curly hair, plain navy cotton kurta. "
+        "Meera's father is never shown; he is present only through the letter and the phone message.")
+
+
+def test_a_bible_written_as_one_string_is_split_per_character():
+    cast = se.cast_list({"bible": {"characters": FLAT}})
+    assert [c["name"] for c in cast] == ["Meera", "Arjun"]  # not one blended person; the unseen father is not drawn
+    assert "saree" in cast[0]["desc"] and "kurta" not in cast[0]["desc"] and "kurta" in cast[1]["desc"]
+
+
+def test_the_approved_story_characters_win_over_the_planner_text():
+    story = {"bible": {"characters": [
+        {"name": "Meera", "face": "oval face", "hair": "low bun", "wardrobe": "red silk saree"},
+        {"name": "Arjun", "face": "light beard", "hair": "short curls", "wardrobe": "navy kurta"},
+        {"name": "Dad", "face": "never shown, only a voice on the phone"}]}}
+    cast = se.cast_list({"bible": {"characters": FLAT}}, story)
+    assert [c["name"] for c in cast] == ["Meera", "Arjun"] and "red silk saree" in cast[0]["desc"]
+
+
+def test_a_different_face_outweighs_any_number_of_accessories():
+    face = ["Meera's face is a different face from the portrait: narrower eyes, thinner lips"]
+    trinkets = ["a thin gold necklace not in her references", "a bracelet on her right wrist", "a bindi"]
+    assert se.drift_score(face) > se.drift_score(trinkets)  # (1, 1) beats (0, 3): the face must be fixed first
+    assert se.drift_score(["Arjun's kurta is grey instead of navy"])[0] == 1
+    assert se.drift_score(["the tote bag is on the other shoulder"])[0] == 0
+
+
+def test_a_character_scene_starts_on_a_model_that_takes_the_references(monkeypatch):
+    calls = []
+
+    async def fake_fal(fn, key, m, prompt, **kw):
+        calls.append((m, sorted(k for k in kw if k in ("image_references", "elements", "start_image"))))
+        return {"video": {"url": "v.mp4"}}
+
+    async def progress(_):
+        pass
+    monkeypatch.setattr(se, "_fal", fake_fal)
+    monkeypatch.setattr(se, "_motion", lambda *a, **k: "she reads")
+    q = {**se.QUALITY["full"]}  # Kling 4.0 first: it takes no character references
+    out = asyncio.run(se._clip({"name": "t", "app_id": "a"}, 0, 1, {"duration": 5}, "still", "9:16", q, "k",
+                               progress, cast=[MIRA]))
+    assert out == ("v.mp4", "seedance_2_0") and calls[0] == ("seedance_2_0", ["image_references"])
+    calls.clear()  # a scene without drawn characters keeps the quality's own order
+    asyncio.run(se._clip({"name": "t", "app_id": "a"}, 0, 1, {"duration": 5}, "still", "9:16", q, "k", progress))
+    assert calls[0][0] == "kling_4_0"

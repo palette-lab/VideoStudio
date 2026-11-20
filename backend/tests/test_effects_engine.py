@@ -41,7 +41,7 @@ def test_real_render_keeps_length(tmp_path, monkeypatch):
         return {"effects": [{"fx": "backdrop-word", "start": 0.5, "end": 2.2, "text": "LEARN"},
                             {"fx": "moody", "start": 2.4, "end": 3.8, "opt": {"grade": "cool"}}]}
 
-    async def no_speech(video, work):
+    async def no_speech(video, work, *_):
         return []
 
     async def looks_fine(shots, plan):

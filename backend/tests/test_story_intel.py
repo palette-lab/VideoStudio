@@ -566,5 +566,5 @@ def test_a_fix_returns_only_the_changed_scenes_and_a_worse_rewrite_is_never_kept
     cls = {"category": "fiction", "duration_s": 18}
     out = asyncio.run(story_intel.architect("a fable", cls, None, [], "9:16",
                                             [{"scene": 1, "area": "scenes", "problem": "weak", "fix": "stronger"}], prev))
-    assert sent["stage"] == "story.architect.revise" and "ONLY what changes" in sent["last"] and sent["tokens"] == 16000
+    assert sent["stage"] == "story.architect.revise" and "ONLY what changes" in sent["last"] and sent["tokens"] == 32000
     assert [s["title"] for s in out["scenes"]] == ["Better opening", "Scene 2", "Scene 3"]

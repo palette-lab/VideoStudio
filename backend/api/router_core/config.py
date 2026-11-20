@@ -43,6 +43,10 @@ def _clean_base(url: str) -> str:
 
 # The Motion Graphics Director always writes on Opus (falls back to the reasoning chain when it is unavailable).
 MOTION_MODEL = os.getenv("MOTION_LLM_MODEL", "anthropic/claude-opus-5.5")
+# How long one model call may take, seconds. The long writers (a documentary or drama architect, a revise, the motion
+# director) take 4-5 minutes on Opus, so the default leaves plenty of room. Speech-to-text has its own limit.
+LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "900"))
+STT_TIMEOUT_S = float(os.getenv("STT_TIMEOUT_S", "600"))
 PREFERRED_MODEL = os.getenv("PALETTE_LLM_MODEL", "")  # e.g. anthropic/claude-opus-5.5 (falls back to palette-llm-max)
 
 

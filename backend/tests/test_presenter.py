@@ -164,7 +164,7 @@ async def test_base_clip_films_the_presenter_from_the_photo(monkeypatch, tmp_pat
 
     async def fake_fal(fn, key, model, prompt, **kw):
         seen.append((model, kw))
-        if model == "kling_3_0_pro":
+        if model == "kling_4_0":
             raise RuntimeError("refused")
         return {"video": {"url": "https://x/base.mp4"}}
 
@@ -174,7 +174,7 @@ async def test_base_clip_films_the_presenter_from_the_photo(monkeypatch, tmp_pat
     monkeypatch.setattr(pe.story_engine, "_fal", fake_fal)
     q = {**pe.QUALITY["full"], "lipsync": pe.LIPSYNC_CHAIN}
     out = await pe.base_clip({"name": "P"}, "https://x/p.png", "talks", "9:16", q, "k", tmp_path, progress)
-    assert out.endswith("presenter_base.mp4") and [m for m, _ in seen] == ["kling_3_0_pro", "kling_3_0_standard"]
+    assert out.endswith("presenter_base.mp4") and [m for m, _ in seen] == ["kling_4_0", "seedance_2_0"]
     kw = seen[-1][1]
     assert kw["start_image"] == "https://x/p.png" and kw["duration"] == "10" and kw["audio"] is False
     assert "mouth moving" in pe.base_prompt(pe.FORMATS["ugc_ad"], "in a kitchen")

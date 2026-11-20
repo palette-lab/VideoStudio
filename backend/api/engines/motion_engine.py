@@ -103,6 +103,72 @@ async def _cli(args: list[str], cwd: Path, timeout: int) -> tuple[int, str]:
     return proc.returncode, out.decode(errors="replace")
 
 
+FPS = 30  # the compositions' data-fps
+
+
+async def _render(proj: Path, out_path: Path, base_video: str | None, spans: list | None, w: int, h: int,
+                  dur: float, progress=None, label: str = "") -> tuple[int, str]:
+    """Render the composition. With graphics on footage and `spans` (the seconds that carry graphics), only those
+    spans go through Chrome (`hyperframes render --start/--end`); ffmpeg puts them back into the untouched footage,
+    which is far faster than capturing every frame of the film. Without spans: one full render."""
+    if not (base_video and spans):
+        return await _cli(["render", ".", "--output", str(out_path)], proj, RENDER_TIMEOUT_S)
+    parts: list[tuple[str, float, float]] = []  # ("base" | span file, start, end)
+    t = 0.0
+    for k, (a, b) in enumerate(spans):
+        if a > t:
+            parts.append(("base", t, a))
+        seg = out_path.with_name(f"{out_path.stem}_span{k}.mp4")
+        if progress:
+            await progress(f"{label}rendering graphics {k + 1}/{len(spans)} ({a:.1f}-{b:.1f} s at {w}x{h})")
+        code, out = await _cli(["render", ".", "--output", str(seg), "--start", f"{a:.3f}", "--end", f"{b:.3f}"],
+                               proj, RENDER_TIMEOUT_S)
+        if code != 0 or not seg.exists():
+            return code or 1, out
+        parts.append((str(seg), a, b))
+        t = b
+    if t < dur:
+        parts.append(("base", t, dur))
+    ff = shutil.which("ffmpeg") or "ffmpeg"
+    inputs, chains = ["-i", base_video], []
+    for k, (src, a, b) in enumerate(parts):
+        norm = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p"
+        if src == "base":
+            chains.append(f"[0:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS,{norm}[v{k}]")
+        else:
+            inputs += ["-i", src]
+            idx = inputs.count("-i") - 1
+            chains.append(f"[{idx}:v]trim=duration={b - a:.3f},setpts=PTS-STARTPTS,{norm}[v{k}]")
+    graph = ";".join(chains) + ";" + "".join(f"[v{k}]" for k in range(len(parts))) + f"concat=n={len(parts)}:v=1:a=0[out]"
+    proc = await asyncio.create_subprocess_exec(
+        ff, "-y", "-v", "error", *inputs, "-filter_complex", graph, "-map", "[out]", "-an", "-c:v", "libx264",
+        "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out_path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    out, _ = await asyncio.wait_for(proc.communicate(), RENDER_TIMEOUT_S)
+    return proc.returncode, out.decode(errors="replace")
+
+
+def graphic_spans(times: list[tuple[float, float]], total: float, pad_in: float = 0.4, pad_out: float = 0.8,
+                  join_gap: float = 1.5, max_share: float = 0.6) -> list[list[float]] | None:
+    """The seconds of the film that carry graphics (each moment padded for its in/out animation, close ones joined),
+    frame-aligned. None when they cover most of the film anyway: then one full render is simpler and as fast."""
+    if total <= 0:
+        return None
+    snap = lambda x: round(round(x * FPS) / FPS, 3)
+    spans: list[list[float]] = []
+    for a, b in sorted((max(0.0, a - pad_in), min(total, b + pad_out)) for a, b in times if b > a or b == a):
+        if spans and a - spans[-1][1] <= join_gap:
+            spans[-1][1] = max(spans[-1][1], b)
+        else:
+            spans.append([a, b])
+    spans = [[snap(a), snap(b)] for a, b in spans if b - a > 0.05]
+    if not spans or sum(b - a for a, b in spans) > max_share * total:
+        return None
+    if total - spans[-1][1] < 0.5:  # a sliver of footage after the last graphic: render to the end
+        spans[-1][1] = snap(total)
+    return spans
+
+
 def _check_report(text: str) -> tuple[list[str], list[str]]:
     """(blocking, quality) findings from `hyperframes check --json`: lint/runtime errors block rendering; layout and
     contrast errors are sent back for repair."""
@@ -328,8 +394,13 @@ async def run(app: dict, handoff: dict, assets: dict, base_video: str | None, wo
     if blocking:
         raise MotionError("The animation did not pass HyperFrames checks: " + "; ".join(blocking)[:400])
     for review in range(2):  # render, look at it, and repair once if the frames show a problem
-        await progress(f"{app['name']}: rendering {dur:g} s at {w}x{h}")
-        code, out = await _cli(["render", ".", "--output", str(out_path)], proj, RENDER_TIMEOUT_S)
+        spans = handoff.get("render_spans") if base_video else None
+        if spans:
+            covered = sum(b - a for a, b in spans)
+            await progress(f"{app['name']}: rendering only the graphics moments ({covered:.1f} of {dur:g} s at {w}x{h})")
+        else:
+            await progress(f"{app['name']}: rendering {dur:g} s at {w}x{h}")
+        code, out = await _render(proj, out_path, base_video, spans, w, h, dur, progress, f"{app['name']}: ")
         if code != 0 or not out_path.exists():
             raise MotionError("HyperFrames render failed: " + out[-500:])
         if review == 1:

@@ -26,16 +26,19 @@ from .vendor.flow import fal_helper, model_skills, video_merge
 
 log = logging.getLogger("palette_video.engines")
 
+# Clip models (all on fal). Kling is always Kling 4.0; every clip falls back down its chain when a model fails.
 QUALITY = {
     "test": {"video_model": "seedance_2_0", "resolution": "480p", "image_model": "nano_banana_pro", "audio": False, "voice": True,
-             "max_scenes": 2, "max_total": 10, "fallbacks": ["kling_3_0_standard"]},
-    "full": {"video_model": "kling_3_0_pro", "resolution": "720p", "image_model": "nano_banana_pro", "audio": True, "voice": True,
-             "max_scenes": 20, "max_total": 120, "fallbacks": ["seedance_2_0"]},
+             "max_scenes": 2, "max_total": 10, "fallbacks": ["kling_4_0", "kling_3_0_standard"]},
+    "full": {"video_model": "kling_4_0", "resolution": "720p", "image_model": "nano_banana_pro", "audio": True, "voice": True,
+             "max_scenes": 20, "max_total": 120, "fallbacks": ["seedance_2_0", "kling_3_0_pro"]},
 }
+# 3D motion graphics on the AI video model: Seedance 2.0 films the keyframes, Kling 4.0 then Kling 3.0 Pro back it up.
+MOTION_3D_MODELS = {"video_model": "seedance_2_0", "fallbacks": ["kling_4_0", "kling_3_0_pro"]}
 # A provider refusing the input (e.g. Seedance on photoreal people) is retried on the next model, as the apps do.
 REFUSAL_MARKERS = ("content_policy", "likeness", "partner_validation", "safety", "nsfw", "refus")
-# Per-clip seconds each clip model accepts (from the apps' catalogs).
-CLIP_RANGE = {"seedance_2_0": (4, 15), "kling_3_0_pro": (3, 15), "kling_3_0_standard": (3, 15)}
+# Per-clip seconds each clip model accepts (from the apps' catalogs; Kling 4.0 takes 3-30 s, kept to 15 per clip).
+CLIP_RANGE = {"seedance_2_0": (4, 15), "kling_4_0": (3, 15), "kling_3_0_pro": (3, 15), "kling_3_0_standard": (3, 15)}
 # Voice-over: each scene's planner "script" line, spoken through fal (same FAL_KEY as the image/video models).
 TTS_MODEL = os.getenv("TTS_MODEL", "fal-ai/elevenlabs/tts/multilingual-v2")
 TTS_VOICE = os.getenv("TTS_VOICE", "Rachel")
@@ -46,8 +49,47 @@ class EngineError(RuntimeError):
     pass
 
 
-def quality() -> dict:
-    return QUALITY.get(os.getenv("PALETTE_VIDEO_QUALITY", "test"), QUALITY["test"])
+# 3D motion graphics engines, picked per run in the plan (story_intel["motion_engine"]):
+#   "opus_llm"     no video model: the Opus LLM plans each keyframe's motion and code renders it (engines/motion_code.py)
+#   "video_model"  the AI clip models film every keyframe
+# The AI video model (fal: Seedance 2.0, then Kling 4.0) is the default; MOTION_VIDEO_MODEL=off makes code animation
+# the default instead. Either way it only changes the default for runs that did not pick one.
+MOTION_ENGINES = {"opus_llm": "Opus LLM (code animation, no video model)", "video_model": "AI video model"}
+MOTION_VIDEO_MODEL = os.getenv("MOTION_VIDEO_MODEL", "on").strip().lower()
+OPUS_MOTION_NAME = "Opus LLM Motion (no video model)"  # what the user sees instead of "Storyboard & Video"
+
+
+def default_motion_engine() -> str:
+    return "opus_llm" if MOTION_VIDEO_MODEL in ("off", "0", "false", "no", "") else "video_model"
+
+
+def code_motion(story_mode: str | None, engine: str | None = None) -> bool:
+    if story_mode != "motion_graphics":
+        return False
+    return (engine if engine in MOTION_ENGINES else default_motion_engine()) == "opus_llm"
+
+
+def quality(story_mode: str | None = None, engine: str | None = None) -> dict:
+    """The run's quality preset; 3D motion graphics filmed by the AI video model use the 3D clip chain."""
+    q = QUALITY.get(os.getenv("PALETTE_VIDEO_QUALITY", "test"), QUALITY["test"])
+    if story_mode == "motion_graphics" and not code_motion(story_mode, engine):
+        q = {**q, **MOTION_3D_MODELS}
+    return q
+
+
+def clip_models(q: dict) -> list[str]:
+    """The clip model, then its fallbacks (no repeats)."""
+    return list(dict.fromkeys([q["video_model"], *q.get("fallbacks", [])]))
+
+
+def clip_resolution(model: str, q: dict) -> str | None:
+    """The resolution field for a clip model: Seedance takes the quality's; Kling 4.0 only 720p or 1080p (its
+    endpoint defaults to 1080p, the dearer one); the other Kling endpoints have no such field."""
+    if model.startswith("seedance"):
+        return q["resolution"]
+    if model == "kling_4_0":
+        return "1080p" if q["resolution"] in ("1080p", "4k") else "720p"
+    return None
 
 
 def fal_key() -> str:
@@ -130,14 +172,12 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 async def _upload(path: str) -> str:
     """A local file as a URL the models can fetch (fal storage). When fal refuses and the LLM Router is set, a
     picture becomes an inline data: URL instead (the router takes base64 images)."""
-    import fal_client
     from . import router_images
     if not (router_images.available() and Path(path).suffix.lower() in IMAGE_SUFFIXES):
-        os.environ.setdefault("FAL_KEY", fal_key())
-        return await asyncio.to_thread(fal_client.upload_file, path)
+        return await asyncio.to_thread(fal_helper.client(fal_key()).upload_file, path)
     if not _fal_is_down() and os.getenv("FAL_KEY"):
         try:
-            return await asyncio.to_thread(fal_client.upload_file, path)
+            return await asyncio.to_thread(fal_helper.client(os.getenv("FAL_KEY")).upload_file, path)
         except Exception as e:
             _mark_fal_down(e)
             log.warning("fal upload of %s failed (%s); sending it inline to the LLM Router", Path(path).name, e)
@@ -197,6 +237,28 @@ def _url(result, kind: str) -> str:
         if v.get("url"):
             return v["url"]
     raise EngineError(f"The {kind} model returned no {kind}: {json.dumps(result, default=str)[:300]}")
+
+
+def written_plan(story: dict, q: dict) -> dict:
+    """The user's own scenes (engines/as_written.py) as the film plan, word for word: no planner, no critic, no
+    rewrite. Each scene's text is its image prompt; its motion text (or the same text) is the clip prompt; its
+    narration line is spoken. Durations as written, else as planned when the scenes were read."""
+    scenes = []
+    for st in ((story.get("plan") or {}).get("scenes") or [])[:q["max_scenes"]]:
+        a = st.get("audio") if isinstance(st.get("audio"), dict) else {}
+        line = str(a.get("line") or "").strip() if a.get("type") != "none" else ""
+        image = str(st.get("what_happens") or "").strip()  # the scene text (or the user's own edit of it)
+        motion = str(st.get("actions") or "").strip() or image
+        scenes.append({"title": st.get("title") or f"Scene {len(scenes) + 1}", "image_prompt": image,
+                       "motion_verbatim": motion, "script": line, "voice": "narration" if line else "none",
+                       "duration": max(1, int(round(float(st.get("duration_s") or 6)))), "as_written": True})
+    if not scenes:
+        raise EngineError("There are no scenes to make.")
+    total = sum(x["duration"] for x in scenes)
+    return {"title": (story.get("plan") or {}).get("title") or "Your scenes", "story": "", "bible": {},
+            "continuity": {}, "master_prompt": "", "scenes": scenes, "total": total, "requested_total": total,
+            "music": "", "recipe": None, "n_max": len(scenes), "genre": "as_written", "genre_label": "Your scenes",
+            "method": None, "edit_direction": None, "as_written": True}
 
 
 async def plan(app_id: str, handoff: dict, refs: list[dict], q: dict, feedback: list[str] | None = None) -> dict:
@@ -437,6 +499,24 @@ def _qa_spec(s: dict, which: str) -> str:
     return "\n".join(out) or f"- {s.get('image_prompt', '')[:900]}"
 
 
+async def _qa_json(parts: list[dict], stage: str, note: dict | None = None, tokens: int = 1500) -> dict | None:
+    """One vision check, retried once. None when both tries fail: the caller then lets the frame through (a check
+    never blocks the film), but the scene is marked qa_unchecked so the report shows it was NOT checked."""
+    last = None
+    for _ in range(2):
+        try:
+            return await llm.chat_json(config.VISION_MODEL, [{"role": "user", "content": parts}], max_tokens=tokens,
+                                       reasoning_effort="low", stage=stage)
+        except Exception as e:  # noqa: BLE001 - any failure of the safety net
+            if type(e).__name__ == "RunCancelled":
+                raise
+            last = e
+    log.warning("%s failed twice (%s); this frame is NOT checked", stage, str(last)[:200])
+    if note is not None:
+        note.setdefault("qa_unchecked", []).append(stage.rsplit(".", 1)[-1])
+    return None
+
+
 async def scene_issues(image_url: str, s: dict, which: str = "first", prev_url: str | None = None,
                        product_url: str | None = None) -> list[str]:
     """AI analysis of one scene frame against its own scene plan ([] = it matches). Catches what the image model
@@ -455,11 +535,8 @@ async def scene_issues(image_url: str, s: dict, which: str = "first", prev_url: 
                              "have exactly that shape, cap / dropper / pump, colours and label; a different cap, a "
                              "second bottle or a loose extra cap is an issue.")
         parts.append({"type": "image_url", "image_url": {"url": product_url}})
-    try:
-        data = await llm.chat_json(config.VISION_MODEL, [{"role": "user", "content": parts}], max_tokens=1500,
-                                   reasoning_effort="low", stage="engine.scene_qa")
-    except Exception as e:  # the check is a safety net; a failed call never blocks the film
-        log.warning("scene check failed: %s", e)
+    data = await _qa_json(parts, "engine.scene_qa", s)
+    if data is None:
         return []
     issues = [str(x) for x in (data.get("issues") or []) if str(x).strip()]
     return [] if data.get("ok") is True and not issues else issues[:QA_MAX_ISSUES]
@@ -485,6 +562,7 @@ Ignore normal motion, light flicker, camera movement that the scene asks for, an
 Return ONLY JSON {"ok": true|false, "issues": ["what is wrong and when (frame N) -> how to fix it in the next
 take", ...]}."""
 CLIP_QA_FRAMES = 6
+CLIP_RETAKES = 2  # new takes of a clip the check finds problems in (face / hair / outfit drift, morphing, ...)
 
 
 def _clip_frames(path: str, n: int = CLIP_QA_FRAMES) -> list[dict]:
@@ -508,9 +586,10 @@ def _clip_frames(path: str, n: int = CLIP_QA_FRAMES) -> list[dict]:
     return parts
 
 
-CLIP_CAST = ("\nThe images after the clip's frames are the CHARACTER REFERENCES ({NAMES}): anyone of them in the "
-             "clip must keep that face, hair (colour, length, style) and outfit in every frame - list any frame where "
-             "they differ from their reference.")
+CLIP_CAST = ("\nThe images after the clip's frames are the CHARACTER REFERENCES, in order: {NAMES}. Anyone of them "
+             "in the clip must keep exactly that face, hair (colour, length, style), outfit (garments, colours, "
+             "patterns), footwear and accessories in every frame - list any frame where they differ from their "
+             "reference (e.g. a different dress colour, hair suddenly loose, another face).")
 
 
 async def clip_issues(path: str, s: dict, product_url: str | None = None,
@@ -528,19 +607,19 @@ async def clip_issues(path: str, s: dict, product_url: str | None = None,
     text = (CLIP_QA.replace("{N}", str(len(frames))).replace("{SPEC}", spec)
             .replace("{PRODUCT}", "\nThe LAST image is the user's real product: wherever it appears in the clip it "
                               "must keep exactly that shape, cap and label." if product_url else ""))
-    faces = [(c.get("name") or "the person", c.get("passport") or c.get("front"))
-             for c in (cast or [])][:MAX_ELEMENTS]
-    faces = [(n, u) for n, u in faces if u]
+    faces = []  # each character's face (passport) and whole outfit (full-body front)
+    for c in (cast or [])[:MAX_ELEMENTS]:
+        nm = c.get("name") or "the person"
+        for label, u in (("face", c.get("passport")), ("full outfit", c.get("front"))):
+            if u and u not in (x for _, x in faces):
+                faces.append((f"{nm} ({label})", u))
     text = text.replace("{CAST}", CLIP_CAST.replace("{NAMES}", ", ".join(n for n, _ in faces)) if faces else "")
     parts = [{"type": "text", "text": text}, *frames]
     parts += [{"type": "image_url", "image_url": {"url": u}} for _, u in faces]
     if product_url:
         parts.append({"type": "image_url", "image_url": {"url": product_url}})
-    try:
-        data = await llm.chat_json(config.VISION_MODEL, [{"role": "user", "content": parts}], max_tokens=1500,
-                                   reasoning_effort="low", stage="engine.clip_qa")
-    except Exception as e:  # a safety net; a failed call never blocks the film
-        log.warning("clip check failed: %s", e)
+    data = await _qa_json(parts, "engine.clip_qa", s)
+    if data is None:
         return []
     issues = [str(x) for x in (data.get("issues") or []) if str(x).strip()]
     return [] if data.get("ok") is True and not issues else issues[:QA_MAX_ISSUES]
@@ -596,17 +675,14 @@ def _refs_note(refs: list[dict], first_index: int = 1) -> str:
             "their reference photo (age, face, hair, clothes), the photo wins.")
 
 
-async def identity_issues(person_url: str, still_url: str, action: str = "") -> list[str]:
+async def identity_issues(person_url: str, still_url: str, action: str = "", note: dict | None = None) -> list[str]:
     """Does the person in a still still look like the uploaded photo? ([] = yes, or no person in the frame)."""
     allowed = (f"\nThis scene's action (changes it SHOWS are allowed, e.g. hair tied back, a wet face): {action[:600]}"
                if action else "")
     parts = [{"type": "text", "text": IDENTITY + allowed}, {"type": "image_url", "image_url": {"url": person_url}},
              {"type": "image_url", "image_url": {"url": still_url}}]
-    try:
-        data = await llm.chat_json(config.VISION_MODEL, [{"role": "user", "content": parts}], max_tokens=1500,
-                                   reasoning_effort="low", stage="engine.story.identity")
-    except Exception as e:  # a safety net; a failed call never blocks the film
-        log.warning("identity check failed: %s", e)
+    data = await _qa_json(parts, "engine.story.identity", note)
+    if data is None:
         return []
     diffs = [str(d) for d in (data.get("differences") or []) if str(d).strip()]
     return [] if data.get("same") is True else (diffs or ["a different-looking person"])[:6]
@@ -619,7 +695,7 @@ change of light for another time of day is fine; the camera angle may differ).""
 
 
 async def consistency_issues(cast_urls: list[str] | str, still_url: str, p: dict,
-                             place_url: str | None = None) -> list[str]:
+                             place_url: str | None = None, note: dict | None = None) -> list[str]:
     """What a viewer would notice changed between the character references (and the scene's location plate) and a
     scene still ([] = consistent)."""
     sheets = [cast_urls] if isinstance(cast_urls, str) else list(cast_urls)
@@ -628,11 +704,8 @@ async def consistency_issues(cast_urls: list[str] | str, still_url: str, p: dict
     parts = [{"type": "text", "text": text},
              *[{"type": "image_url", "image_url": {"url": u}} for u in sheets + ([place_url] if place_url else [])],
              {"type": "image_url", "image_url": {"url": still_url}}]
-    try:
-        data = await llm.chat_json(config.VISION_MODEL, [{"role": "user", "content": parts}], max_tokens=1500,
-                                   reasoning_effort="low", stage="engine.story.consistency")
-    except Exception as e:  # the check is a safety net; a failed call never blocks the film
-        log.warning("consistency check failed: %s", e)
+    data = await _qa_json(parts, "engine.story.consistency", note)
+    if data is None:
         return []
     diffs = [str(d) for d in (data.get("differences") or []) if str(d).strip()]
     return [] if data.get("same") is True and not diffs else diffs[:6]
@@ -760,9 +833,45 @@ def _char_text(c) -> tuple[str, str]:
     return "", text
 
 
-def cast_list(p: dict) -> list[dict]:
-    """Every character of the film as {"name", "desc"} (continuity entities first, else the bible's characters)."""
+NOT_SHOWN = re.compile(r"\b(never (shown|seen|on screen|appears)|not shown|not seen|off[- ]?screen|only (heard|"
+                       r"through|as a voice|in the letter|on the phone)|unseen)\b", re.I)
+_CHAR_SPLIT = re.compile(r"(?:^|(?<=[.;!?])\s+)([A-Z][A-Za-z'\u2019 -]{1,40}?(?: \([^)]{1,40}\))?):\s")
+
+
+def _shown(desc: str) -> str | None:
+    """The description of a character the film shows, without sentences about someone never shown; None when the
+    character itself is never shown (its first sentence says so)."""
+    sentences = re.split(r"(?<=[.!?])\s+", (desc or "").strip())
+    if not sentences or not sentences[0] or NOT_SHOWN.search(sentences[0]):
+        return None
+    return " ".join(x for x in sentences if not NOT_SHOWN.search(x)).strip() or None
+
+
+def split_characters(text: str) -> list[tuple[str, str]]:
+    """A bible written as one string ("Meera: 28, ... Arjun: 30, ...") as [(name, "Name: description")]."""
+    marks = list(_CHAR_SPLIT.finditer(text or ""))
     out = []
+    for k, m in enumerate(marks):
+        body = text[m.end(): marks[k + 1].start() if k + 1 < len(marks) else len(text)].strip()
+        if body:
+            out.append((m.group(1).strip(), f"{m.group(1).strip()}: {body}"))
+    return out
+
+
+def cast_list(p: dict, story: dict | None = None) -> list[dict]:
+    """Every character the film SHOWS, one entry each, as {"name", "desc"}: the approved story's own character list
+    first (structured: face, hair, wardrobe per person), then the planner's continuity entities, then its bible -
+    where a bible written as one string is split per character, never drawn as one blended person. Characters the
+    story never shows (a voice on the phone, a dead father in a letter) are not drawn."""
+    out = []
+    for c in ((story or {}).get("bible") or {}).get("characters") or []:
+        if isinstance(c, dict) and c.get("name"):
+            name, desc = _char_text(c)
+            desc = _shown(desc)
+            if desc:
+                out.append({"name": name, "desc": desc})
+    if out:
+        return [{**c, "desc": c["desc"][:900]} for c in out[:MAX_CAST]]
     for e in (p.get("continuity") or {}).get("entities") or []:
         if isinstance(e, dict) and e.get("kind") == "character" and e.get("name"):
             locked = "; ".join(str(x) for x in (e.get("locked") or [])[:12])
@@ -770,9 +879,11 @@ def cast_list(p: dict) -> list[dict]:
     if not out:
         chars = (p.get("bible") or {}).get("characters")
         for c in (chars if isinstance(chars, list) else [chars]):
-            name, desc = _char_text(c)
-            if desc:
-                out.append({"name": name, "desc": desc})
+            parts = split_characters(c) if isinstance(c, str) else []
+            for name, desc in (parts if len(parts) > 1 else [_char_text(c)]):
+                desc = _shown(desc)
+                if desc:
+                    out.append({"name": name, "desc": desc})
     return [{**c, "desc": c["desc"][:900]} for c in out[:MAX_CAST]]
 
 
@@ -803,6 +914,11 @@ PERSON_WORDS = re.compile(r"\b(he|she|his|her|him|they|their|man|men|woman|women
 GROUP_WORDS = re.compile(r"\b(they|them|their|people|men|women|children|kids|couple|friends|family|everyone|"
                          r"both|together|group|crowd)\b", re.I)
 _NAME_STOP = {"the", "a", "an", "young", "old", "little", "small", "big", "mr", "mrs", "ms"}
+# Animal / creature leads (a fox, a dragon, a robot): a scene that shows one without naming it still gets the cast's
+# references, or the clip invents a new creature.
+CREATURE_WORDS = re.compile(r"\b(animal|creature|fox|cat|kitten|dog|puppy|rabbit|bunny|bear|lion|tiger|wolf|bird|owl|"
+                            r"duck|mouse|elephant|monkey|horse|pony|dragon|unicorn|robot|monster|fairy|alien)\b",
+                            re.I)
 
 
 def scene_cast(s: dict, cast: list[dict]) -> list[dict]:
@@ -820,7 +936,7 @@ def scene_cast(s: dict, cast: list[dict]) -> list[dict]:
         return named
     if any(c.get("photo") for c in cast) and PERSON_WORDS.search(text):
         return [c for c in cast if c.get("photo")] or cast
-    if not PERSON_WORDS.search(text):
+    if not PERSON_WORDS.search(text) and not CREATURE_WORDS.search(text):
         return []
     # Everyone's references for a scene that names nobody made the image model blend the faces: the lead only,
     # unless the scene is plainly about several people.
@@ -839,6 +955,17 @@ LOOK_FRAME = ("LOOK FRAME (style reference) for a film. {MASTER} One establishin
 # running together in each phase.
 PARALLEL_SCENES = max(1, int(os.getenv("STORY_PARALLEL_SCENES", "10")))
 CAST_REDRAWS = 2  # a still whose character drifted (face, hair, wardrobe) is redrawn up to this many times
+CAST_FRESH = 2  # then, while the FACE, hair or outfit is still wrong, the frame is drawn again from scratch
+# A difference a viewer reads as "another person" or "another outfit" (a necklace or a bag is minor).
+MAJOR_DRIFT = re.compile(r"\b(face|facial|features|different (person|woman|man|girl|boy|character)|another (person|"
+                         r"woman|man)|look-?alike|skin|older|younger|age|hair|hairstyle|bun|braid|beard|moustache|"
+                         r"curl\w*|bald|saree|sari|kurta|outfit|dress|shirt|jacket|wardrobe|clothes|clothing|garment|"
+                         r"colou?r of (her|his|the) (saree|dress|shirt|kurta|outfit))\b", re.I)
+
+
+def drift_score(drift: list[str]) -> tuple[int, int]:
+    """(major, total) differences: a frame with fewer face / hair / outfit differences always wins."""
+    return sum(1 for d in drift if MAJOR_DRIFT.search(d)), len(drift)
 
 
 def _sound(s: dict) -> str:
@@ -951,6 +1078,8 @@ def _motion(app_id: str, s: dict, q: dict, fix: str = "") -> str:
     frame (which tie the scene to its neighbours), then the sound. A retake puts the problems to avoid first."""
     lead = (f"One continuous shot in one place, no cuts, nothing morphs. AVOID (problems in the last take): {fix}. "
             if fix else "")
+    if s.get("motion_verbatim"):  # the user's own scene: their words as written (a retake only adds what to avoid)
+        return lead + s["motion_verbatim"]
     if s.get("motion_text"):  # a cooking scene: the ChefVision motion choreography
         text = lead + s["motion_text"] + (f". {_sound(s)}" if q.get("audio") else "")
         prompt, _neg = model_skills.finalize_motion(q["video_model"], text, sound=q["audio"])
@@ -967,10 +1096,53 @@ def _motion(app_id: str, s: dict, q: dict, fix: str = "") -> str:
     return prompt
 
 
+class Checkpoint:
+    """What a film step has already made (the reviewed plan, the character sheets and places, each scene's images and
+    clip, the recorded voice), kept on disk so a Retry continues where the step failed instead of starting over.
+    One file per run + step + plan revision (handoff["_resume"]). It is read back only when the user pressed Retry on
+    the failed step (handoff["_resume_load"]); every other start, or a different request (other prompt, story,
+    quality), begins fresh and overwrites it. Without a resume folder every get() is None and put() does nothing."""
+
+    def __init__(self, folder: str | None, key_data: dict, load: bool = True):
+        import hashlib
+        self.path = Path(folder) / "checkpoint.json" if folder else None
+        self.key = hashlib.sha256(json.dumps(key_data, sort_keys=True, default=str).encode()).hexdigest()[:16]
+        self.data: dict = {}
+        if load and self.path and self.path.exists():
+            try:
+                saved = json.loads(self.path.read_text())
+                if saved.get("key") == self.key:
+                    self.data = saved.get("data") or {}
+            except (OSError, ValueError) as e:
+                log.warning("checkpoint %s unreadable (%s); starting fresh", self.path, e)
+
+    def get(self, name: str, default=None):
+        return self.data.get(name, default)
+
+    def put(self, name: str, value) -> None:
+        if not self.path:
+            return
+        self.data[name] = json.loads(json.dumps(value, default=str))  # a snapshot, not a live reference
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"key": self.key, "data": self.data}, ensure_ascii=False))
+            tmp.replace(self.path)
+        except OSError as e:  # resuming is a convenience; the film never fails because of it
+            log.warning("checkpoint not saved (%s)", e)
+
+
+def _files_exist(paths: list | None) -> bool:
+    return bool(paths) and all(p is None or Path(p).exists() for p in paths)
+
+
 async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> dict:
     """Make the film. Returns {"path", "duration_s", "plan", "scenes":[{title, still_url, clip_url, duration}]}."""
     app_id = app["app_id"]
-    q = quality()
+    _st = handoff.get("_story") or {}
+    if code_motion(_st.get("mode"), _st.get("motion_engine")):  # Opus animates it: say so in every message
+        app = {**app, "name": OPUS_MOTION_NAME}
+    q = quality(_st.get("mode"), _st.get("motion_engine"))
     key = fal_key()
     work.mkdir(parents=True, exist_ok=True)
     refs = []
@@ -979,9 +1151,32 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
             await progress(f"{app['name']}: uploading reference {a['filename']}")
             refs.append({"asset_id": aid, "filename": a["filename"], "role": a.get("role") or "unclear",
                          "summary": (a.get("summary") or "")[:400], "url": await _upload(a["path"])})
-    await progress(f"{app['name']}: planning the story")
-    p = await plan(app_id, handoff, refs, q)
-    if p.get("recipe"):  # a cooking film: the ChefVision quality and continuity gate instead of the story critic
+    ck = Checkpoint(handoff.get("_resume"), {
+        "prompt": handoff.get("prompt"), "request": handoff.get("request"), "quality": q,
+        "story": ((handoff.get("_story") or {}).get("plan") or {}).get("scenes"),
+        "motion_engine": _st.get("motion_engine"), "recipe": bool(handoff.get("_recipe")),
+        "refs": sorted(r["asset_id"] for r in refs)}, load=bool(handoff.get("_resume_load")))
+    resumed = ck.get("plan")
+    if resumed:
+        await progress(f"{app['name']}: resuming - reusing the reviewed plan"
+                       + (f", {len(ck.get('scenes') or {})} scene image(s)" if ck.get("scenes") else "")
+                       + (f" and {len(ck.get('clips') or {})} clip(s)" if ck.get("clips") else "")
+                       + " from the failed attempt")
+        p = resumed
+    elif _st.get("mode") == "as_written":  # the user's own scenes: no planner, nothing rewritten
+        await progress(f"{app['name']}: your {len(((_st.get('plan') or {}).get('scenes') or []))} scenes, exactly as written")
+        p = written_plan(_st, q)
+    else:
+        await progress(f"{app['name']}: planning the story")
+        p = await plan(app_id, handoff, refs, q)
+    from . import lang as lang_  # one language for voice, hook and words: the user's own
+    language = lang_.detect(str(handoff.get("prompt") or "").split("\n\nDetailed version")[0],
+                            ((handoff.get("_story") or {}).get("classification") or {}).get("language")
+                            or handoff.get("language"))
+    p["language"] = language
+    if resumed:  # already reviewed (and rewritten if it had to be) on the earlier attempt
+        review = p.get("review") or {"score": None, "passed": True, "issues": [], "kind": "resumed"}
+    elif p.get("recipe"):  # a cooking film: the ChefVision quality and continuity gate instead of the story critic
         rec = p["recipe"]
         await progress(f"{app['name']}: {rec['dish'] or 'the recipe'} - {len(rec['workflow'])} cooking stages; "
                        "checking the scenes")
@@ -999,14 +1194,17 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
             review = {"score": None, "passed": True, "issues": [], "kind": "approved_story"}
         else:
             review = await critique(handoff.get("prompt") or "", p)
-    if not review["passed"] and review.get("kind") != "food":
+    if not resumed and not review["passed"] and review.get("kind") != "food":
         await progress(f"{app['name']}: the review scored {review['score']}/100, rewriting the plan")
         p2 = await plan(app_id, handoff, refs, q, feedback=review["issues"])
         review2 = await critique(handoff.get("prompt") or "", p2)
         if (review2["score"] or 0) >= (review["score"] or 0):
             p, review = p2, {**review2, "first_score": review["score"]}
     p["review"] = review
-    if p.get("method"):
+    p["language"] = language  # a rewritten plan (critic or food fix) is a new dict: it needs the language again
+    if not resumed:
+        ck.put("plan", p)  # before narration: its retiming is redone from the recorded voice on every attempt
+    if p.get("method") and not resumed:
         approaches.remember(p["method"]["family"], p["method"]["id"])
         await progress(f"{app['name']}: story method - {p['method']['label']}")
     ar = (handoff.get("request") or {}).get("aspect_ratio") or "16:9"
@@ -1023,10 +1221,14 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
     if q.get("voice") and any(lines):
         await progress(f"{app['name']}: recording the narration")
         voices: list[str] = []
-        lang = (((handoff.get("_story") or {}).get("classification") or {}).get("language")
-                or handoff.get("language") or "english")
+        lang = p["language"]
         try:
-            vo_files = await record_narration(lines, work, key, lang, voices, host_gender)
+            kept = ck.get("narration") or {}
+            if kept.get("lines") == lines and _files_exist(kept.get("files")) and any(kept.get("files") or []):
+                vo_files, voices = kept["files"], kept.get("voices") or []  # recorded on the earlier attempt
+            else:
+                vo_files = await record_narration(lines, work, key, lang, voices, host_gender)
+                ck.put("narration", {"lines": lines, "files": vo_files, "voices": voices})
             p["narration_voice"] = sorted(set(voices))
         except Exception as e:  # no voice available: the film is still made, music-led, and the user is told why
             log.warning("narration failed: %s", e)
@@ -1042,9 +1244,14 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
     if story_mode == "short_drama" and q.get("voice") and any(s.get("line") for s in p["scenes"]):
         k = len([s for s in p["scenes"] if s.get("line")])
         await progress(f"{app['name']}: recording {k} line{'s' if k > 1 else ''}, each in its character's own voice")
-        talk = await record_dialogue(p["scenes"], ((handoff.get("_story") or {}).get("plan") or {}).get("voices") or {},
-                                     work, key, ((handoff.get("_story") or {}).get("classification") or {}).get("language")
-                                     or "english")
+        kept = ck.get("dialogue") or {}
+        if _files_exist(kept.get("files")) and any(kept.get("files") or []):
+            talk = kept["files"]  # recorded on the earlier attempt
+        else:
+            talk = await record_dialogue(p["scenes"], ((handoff.get("_story") or {}).get("plan") or {}).get("voices") or {},
+                                         work, key, ((handoff.get("_story") or {}).get("classification") or {}).get("language")
+                                         or "english")
+            ck.put("dialogue", {"files": talk})
         if not any(talk):
             await progress(f"{app['name']}: no voice could be recorded; the lines stay as subtitles")
         fitted = fit_to_narration([s["duration"] for s in p["scenes"]], talk, lo, hi)
@@ -1066,6 +1273,9 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                                                           work / "music.wav"))
     if p.get("recipe"):  # every scene gets its ChefVision image JSON and motion JSON (the prompts the models get)
         food.finalize(p["scenes"], p["recipe"], ar)
+    coded = code_motion(story_mode, (handoff.get("_story") or {}).get("motion_engine"))
+    if coded:
+        await progress(f"{app['name']}: no video model - every keyframe is animated in code from an LLM motion plan")
     style = _style(p["bible"]) + _locks(p.get("continuity") or {})
     refs = _ordered_refs(refs)
     ref_urls = [r["url"] for r in refs][:7]
@@ -1138,7 +1348,7 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
     # Every person or animal in the film is drawn first: the user's uploaded person from their photo (it stands for
     # the first character), the others from the plan's description.
     # A documentary never draws a generated face for a real person: its people are archive photos (or the user's).
-    members = [] if story_mode == "cinematic_doc" else cast_list(p)
+    members = [] if story_mode == "cinematic_doc" else cast_list(p, (handoff.get("_story") or {}).get("plan"))
     series = (handoff.get("_story") or {}).get("series") if story_mode == "short_drama" else None
     if series and series.get("cast"):
         members = reuse_cast(members, series["cast"])
@@ -1150,16 +1360,26 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
     await progress(f"{app['name']}: locking the look"
                    + (f" and drawing {len(members)} character{'s' if len(members) > 1 else ''} (passport portrait, "
                       "front and back) before the scenes" if members else " before the scenes"))
-    places = {} if story_mode == "cinematic_doc" or p.get("recipe") else await plan_locations(p)
-    locs = places.get("locations") or []
-    if locs:
-        await progress(f"{app['name']}: drawing {len(locs)} location{'s' if len(locs) > 1 else ''} before the scenes ("
-                       + ", ".join(l.get("name") or l["id"] for l in locs) + ")")
-    got = await asyncio.gather(
-        *[character(m) for m in members],
-        sheet(LOOK_FRAME, "look frame", ref_urls[:3]) if not locs else asyncio.sleep(0, None),
-        *[sheet(PLATE.replace("{DESC}", str(l["plate"])[:900]), f"location {l['id']}", ref_urls[:3]) for l in locs])
-    drawn, look, plates = got[:len(members)], got[len(members)], got[len(members) + 1:]
+    setup = ck.get("setup")
+    if setup and len(setup.get("drawn") or []) == len(members):  # drawn on the earlier attempt
+        places, drawn, look, plates = setup["places"], setup["drawn"], setup["look"], setup["plates"]
+        locs = places.get("locations") or []
+    else:
+        places = ({} if story_mode in ("cinematic_doc", "as_written") or p.get("recipe")
+                  else await plan_locations(p))
+        locs = places.get("locations") or []
+        if locs:
+            await progress(f"{app['name']}: drawing {len(locs)} location{'s' if len(locs) > 1 else ''} before the scenes ("
+                           + ", ".join(l.get("name") or l["id"] for l in locs) + ")")
+        got = await asyncio.gather(
+            *[character(m) for m in members],
+            sheet(LOOK_FRAME, "look frame", ref_urls[:3]) if not locs and story_mode != "as_written"
+            else asyncio.sleep(0, None),
+            *[sheet(PLATE.replace("{DESC}", str(l["plate"])[:900]), f"location {l['id']}", ref_urls[:3]) for l in locs])
+        drawn, look, plates = list(got[:len(members)]), got[len(members)], list(got[len(members) + 1:])
+        ck.put("setup", {"places": places, "drawn": drawn, "look": look, "plates": plates})
+        ck.put("scenes", {})  # new character sheets: images and clips made from the old ones are not reused
+        ck.put("clips", {})
     plate_of = {l["id"]: (l, u) for l, u in zip(locs, plates) if u}
     scene_place = [plate_of.get(x) for x in places.get("scenes") or [None] * len(p["scenes"])]
     if plate_of:
@@ -1218,7 +1438,7 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
         if person_url:
             best = img
             for attempt in range(3):
-                drift = await identity_issues(person_url, img, s.get("action") or "")
+                drift = await identity_issues(person_url, img, s.get("action") or "", note=s)
                 if best_n is None or len(drift) < best_n:
                     best, best_n = img, len(drift)
                 if not drift or attempt == 2:
@@ -1273,7 +1493,7 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                       "image_urls": ([still] + anchor + ref_urls[:3])[:MAX_IMAGE_REFS]}
             last = await draw(prompt, img_kw, s, f"scene {i + 1} last frame", which="last", prev_url=still)
             # the clip interpolates towards this frame: a drifted face or outfit here drifts the whole clip
-            return await match_cast(i, s, last, img_kw, who, "last")
+            return await match_cast(i, s, last, img_kw, who, "last", prompt)
         except Exception as e:  # a missing end frame only loses the A-to-B guide; the clip still runs
             log.warning("end frame for scene %s failed: %s", i + 1, e)
             return None
@@ -1307,20 +1527,27 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
         urls = (anchor + [a["fal_url"] for a in arch] + ref_urls[:5])[:MAX_IMAGE_REFS]
         if urls:
             img_kw["image_urls"] = urls
-        prompt = (s["image_prompt"] + props_line(s) + _cast_note(who) + look_note(len(anchor), i)
-                  + _archive_note(arch, len(anchor) + 1) + _refs_note(refs[:5], len(anchor) + len(arch) + 1) + _continuity(i, s, p["scenes"], False) + style)
+        if s.get("as_written"):  # the user's words exactly; only what their own reference images are is added
+            prompt = s["image_prompt"] + _cast_note(who) + _refs_note(refs[:5], len(anchor) + len(arch) + 1)
+        else:
+            prompt = (s["image_prompt"] + props_line(s) + _cast_note(who) + look_note(len(anchor), i)
+                      + _archive_note(arch, len(anchor) + 1) + _refs_note(refs[:5], len(anchor) + len(arch) + 1)
+                      + _continuity(i, s, p["scenes"], False) + style)
         s["still_prompt"] = prompt
         s["cast_in_scene"] = [c.get("name") or "the person" for c in who]
         still = await draw(prompt, img_kw, s, f"scene {i + 1}", which="first")
-        return await match_cast(i, s, still, img_kw, who, "first")
+        return await match_cast(i, s, still, img_kw, who, "first", prompt)
 
-    async def match_cast(i: int, s: dict, still: str, img_kw: dict, who: list[dict], which: str) -> str:
-        """A vision check of a frame against the scene's characters and place; edited until they match."""
+    async def match_cast(i: int, s: dict, still: str, img_kw: dict, who: list[dict], which: str,
+                         prompt: str = "") -> str:
+        """A vision check of a frame against the scene's characters and place; edited until they match. While a
+        face, hair or outfit still differs after the edits, the frame is drawn again from scratch (with the
+        character references) and the closest one is kept: no clip is made from a frame with another person."""
         refs_who = [u for c in who for u in c["urls"]]
         pl = place_of(i)
         frame = "" if which == "first" else " last frame"
         if refs_who or pl:
-            drift = await consistency_issues(refs_who, still, p, pl[1] if pl else None)
+            drift = await consistency_issues(refs_who, still, p, pl[1] if pl else None, note=s)
             fixed: list[str] = []
             for _ in range(CAST_REDRAWS):
                 if not drift:
@@ -1340,8 +1567,26 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                 except Exception as e:  # the earlier still is still usable
                     log.warning("scene %s character fix failed: %s", i + 1, e)
                     break
-                drift2 = await consistency_issues(refs_who, again, p, pl[1] if pl else None)
-                if len(drift2) <= len(drift):
+                drift2 = await consistency_issues(refs_who, again, p, pl[1] if pl else None, note=s)
+                if drift_score(drift2) <= drift_score(drift):
+                    still, drift = again, drift2
+            for k in range(CAST_FRESH if refs_who and prompt else 0):
+                if not drift_score(drift)[0]:
+                    break
+                major = [d for d in drift if MAJOR_DRIFT.search(d)]
+                await progress(f"{app['name']}: scene {i + 1}{frame} still shows a different look ({major[0][:70]}); "
+                               f"drawing it again from the character references ({k + 1}/{CAST_FRESH})")
+                fixed += drift
+                redo = (prompt + "\nMOST IMPORTANT: every character is EXACTLY the person in their reference images - "
+                        "the same face (shape, eyes, nose, mouth, eyebrows, skin tone, age), the same hair and the same "
+                        "outfit and colours. Avoid: " + "; ".join(major) + ".")
+                try:
+                    again = _url(await _fal(fal_helper.generate_image, key, q["image_model"], redo, **img_kw), "image")
+                except Exception as e:  # the closest frame so far is still usable
+                    log.warning("scene %s fresh character redraw failed: %s", i + 1, e)
+                    break
+                drift2 = await consistency_issues(refs_who, again, p, pl[1] if pl else None, note=s)
+                if drift_score(drift2) < drift_score(drift):
                     still, drift = again, drift2
             suffix = "" if which == "first" else "_last"
             if fixed:
@@ -1351,18 +1596,29 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
         return still
 
     async def frames(i: int, s: dict) -> None:
+        kept = (ck.get("scenes") or {}).get(str(i))
+        if kept and kept.get("still"):  # drawn (and checked) on the earlier attempt
+            stills[i], ends[i] = kept["still"], kept.get("end")
+            s.update({k: v for k, v in (kept.get("scene") or {}).items() if k not in ("duration",)})
+            board[i]["still_url"] = stills[i]
+            await publish()
+            return
         async with gate:
             stills[i] = still = await first_frame(i, s)
             board[i]["still_url"] = still
             await publish()
-            ends[i] = await end_frame(i, s, still)
+            if not coded:  # code animation needs no last frame: one image call less per scene
+                ends[i] = await end_frame(i, s, still)
+        saved = ck.get("scenes") or {}
+        saved[str(i)] = {"still": stills[i], "end": ends[i], "scene": s}
+        ck.put("scenes", saved)
 
     n = len(p["scenes"])
     hosted: dict[int, str] = {}
     host_job = None
     if host_at:  # the documentary's host is filmed and lip-synced while the board images are drawn
         from . import presenter_engine
-        lang = (((handoff.get("_story") or {}).get("classification") or {}).get("language") or "english")
+        lang = p["language"]
         await progress(f"{app['name']}: filming the host for scene{'s' if len(host_at) > 1 else ''} "
                        + ", ".join(str(i + 1) for i in host_at))
         host_job = asyncio.create_task(presenter_engine.host_clips(
@@ -1394,11 +1650,22 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                 for i in host_at:
                     vo_files[i] = extra[i]
             await all_or_nothing([frames(i, p["scenes"][i]) for i in host_at])
-    await progress(f"{app['name']}: all images ready - rendering {n - len(hosted)} clips in parallel")
+    await progress(f"{app['name']}: all images ready - "
+                   + (f"animating {n} scenes in code (no video model)" if coded
+                      else f"rendering {n - len(hosted)} clips in parallel"))
 
     async def scene(i: int, s: dict) -> dict:
+        kept = (ck.get("clips") or {}).get(str(i))
+        if kept and kept.get("path") and Path(kept["path"]).exists() and kept.get("still_url") == stills[i]:
+            board[i].update(clip_url=kept.get("clip_url"), model=kept.get("model"))
+            await publish()
+            return kept  # rendered (and checked) on the earlier attempt
         async with gate:
-            return await _scene(i, s)
+            out = await _scene(i, s)
+        saved = ck.get("clips") or {}
+        saved[str(i)] = out
+        ck.put("clips", saved)
+        return out
 
     async def speak_on_camera(i: int, s: dict, path: str) -> str:
         from . import presenter_engine
@@ -1424,9 +1691,30 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                     "qa": {}, "clip_url": None, "model": "host (lip-sync)", "host": True,
                     "script": s.get("host_line") or "", "path": hosted[i]}
         still = stills[i]
+        if coded:  # no video model: the LLM plans the keyframe's motion, code renders it
+            from . import motion_code
+            await progress(f"{app['name']}: scene {i + 1}/{len(p['scenes'])} - planning and animating in code")
+            src = await _download(still, work / "motion" / f"key_{i + 1:02d}.png")
+            path, plan = await motion_code.animate(Path(src), s, float(s["duration"]), ar,
+                                                   work / "motion" / f"scene_{i + 1:02d}", i + 1)
+            used = "code animation (LLM-planned" + (", camera move only)" if plan.get("fallback") else ")")
+            s["motion_plan"] = {"camera": plan["camera"], "layers": len(plan["layers"])}
+            board[i].update(clip_url=None, model=used)
+            await publish()
+            return {"title": s.get("title") or f"Scene {i + 1}", "duration": s["duration"], "still_url": still,
+                    "beat": s.get("beat") or "", "action": s.get("action") or "", "link": s.get("link") or "",
+                    "end_still_url": None, "change": s.get("change") or "",
+                    "image_prompt": s.get("still_prompt") or s.get("image_prompt") or "",
+                    "motion_prompt": s.get("motion_prompt") or "", "props": s.get("props") or "",
+                    "qa": s.get("qa") or {}, "clip_url": None, "model": used, "path": path}
         # A last frame very different from the first makes the clip model MORPH one into the other: for a large
         # change the last frame only guides the next scene; the clip performs the action from the prompt.
         end = ends[i] if use_end_frame(s) else None
+        if end and s.get("consistency_left_last"):  # a drifted last frame would pull the whole clip towards it
+            log.info("scene %s: last frame still drifts (%s); the clip runs without it", i + 1,
+                     s["consistency_left_last"][0][:120])
+            s["end_frame_dropped"] = True
+            end = None
         who = scene_cast(s, cast)
         clip, used = await _clip(app, i, len(p["scenes"]), s, still, ar, q, key, progress, end=end, cast=who)
         path = await _download(clip, work / f"scene_{i + 1:02d}.mp4")
@@ -1434,19 +1722,23 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
             await progress(f"{app['name']}: AI checking scene {i + 1} clip")
             issues = await clip_issues(path, s, product_url, cast=who)
             rec = {"issues": issues, "retaken": False}
-            if issues:
-                await progress(f"{app['name']}: scene {i + 1} clip - {issues[0][:90]}; making a new take")
+            for take in range(2, 2 + CLIP_RETAKES):  # new takes while the clip has problems; the fewest issues wins
+                if not issues:
+                    break
+                await progress(f"{app['name']}: scene {i + 1} clip - {issues[0][:90]}; making take {take}")
                 try:
-                    morph = any(w in " ".join(issues).lower() for w in ("morph", "jump", "cuts to", "changes shape"))
+                    morph = any(w in " ".join(issues).lower() for w in ("morph", "jump", "cuts to", "changes shape",
+                                                                        "different face", "outfit", "hair"))
                     clip2, used2 = await _clip(app, i, len(p["scenes"]), s, still, ar, q, key, progress,
                                                end=None if morph else end, fix="; ".join(issues), cast=who)
-                    path2 = await _download(clip2, work / f"scene_{i + 1:02d}_take2.mp4")
+                    path2 = await _download(clip2, work / f"scene_{i + 1:02d}_take{take}.mp4")
                     issues2 = await clip_issues(path2, s, product_url, cast=who)
                     if len(issues2) < len(issues):
-                        clip, used, path = clip2, used2, path2
-                        rec = {"issues": issues2, "retaken": True, "fixed": issues}
-                except Exception as e:  # the first take is still usable
-                    log.warning("scene %s retake failed: %s", i + 1, e)
+                        rec = {"issues": issues2, "retaken": True, "fixed": (rec.get("fixed") or []) + issues}
+                        clip, used, path, issues = clip2, used2, path2, issues2
+                except Exception as e:  # the best take so far is still usable
+                    log.warning("scene %s take %s failed: %s", i + 1, take, e)
+                    break
             s.setdefault("qa", {})["clip"] = rec
         if talk[i]:  # a short drama's spoken line, in the speaker's voice, lip-synced onto this clip
             path = await speak_on_camera(i, s, path)
@@ -1461,7 +1753,8 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
 
     done = await all_or_nothing([scene(i, s) for i, s in enumerate(p["scenes"])])
     await progress(f"{app['name']}: joining {len(done)} clips")
-    final = await join([d["path"] for d in done], work / "final.mp4", ar, q["resolution"])
+    final = await join([d["path"] for d in done], work / "final.mp4", ar,
+                       "1080p" if coded else q["resolution"])  # code clips cost nothing at full size
     if any(vo_files):
         await progress(f"{app['name']}: mixing the narration")
         final = await add_voiceover(final, [d["path"] for d in done], vo_files,
@@ -1473,7 +1766,7 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
                                        person_talks=any(_voice(s) == "on_camera" for s in p["scenes"]))
     if story_mode == "cinematic_doc":
         level = "documentary"
-    if story_mode == "short_drama":
+    if story_mode in ("short_drama", "as_written"):  # as written: only the user's own lines (subtitles), no added text
         level = "drama"
     await progress(f"{app['name']}: finishing - {motion_design.finish_summary(level)}")
     if music_job:
@@ -1548,7 +1841,20 @@ async def run(app: dict, handoff: dict, assets: dict, work: Path, progress) -> d
             "voiceover": [l for l in lines if l] if q.get("voice") else [],
             "voice": [_voice(s) for s in p["scenes"]], "graphics": graphics, "effects": effects, "finish_level": level,
             "spans": spans, "aspect_ratio": ar, "clean": clean, "text_layer": text, "credits": credits,
+            "clip_models": clip_models(q),
             "scenes": [{**{k: v for k, v in d.items() if k != "path"}, "local_clip": d["path"]} for d in done]}
+
+
+def film_cast(out: dict) -> list[dict]:
+    """The finished film's drawn characters (plan["cast"]) in the shape scene_cast / _cast_note use."""
+    members = []
+    for c in ((out.get("plan") or {}).get("cast") or []):
+        views = [(v, c.get(k)) for v, k in (("passport portrait", "passport"), ("full-body front", "front"),
+                                             ("full-body back", "back")) if c.get(k)]
+        if views:
+            members.append({**c, "name": c.get("name") or "", "urls": [u for _, u in views],
+                            "views": [v for v, _ in views]})
+    return members
 
 
 async def rerender_scene(out: dict, n: int, instruction: str, work: Path, progress) -> dict:
@@ -1557,6 +1863,8 @@ async def rerender_scene(out: dict, n: int, instruction: str, work: Path, progre
     time span. The narration, music and the other scenes (with their graphics) stay as they were.
     Returns {"path", "scene": the updated scene entry}."""
     q, key = quality(), fal_key()
+    if out.get("clip_models"):  # the same clip chain the film was made with (3D motion: Seedance 2.0 first)
+        q = {**q, "video_model": out["clip_models"][0], "fallbacks": out["clip_models"][1:]}
     scenes, spans = out.get("scenes") or [], out.get("spans") or []
     if not (1 <= n <= len(scenes)) or len(spans) != len(scenes):
         raise EngineError("this film has no scene timing to replace a scene in")
@@ -1564,14 +1872,38 @@ async def rerender_scene(out: dict, n: int, instruction: str, work: Path, progre
     ar = out.get("aspect_ratio") or "16:9"
     work.mkdir(parents=True, exist_ok=True)
     prev = (scenes[n - 2].get("end_still_url") or scenes[n - 2].get("still_url")) if n > 1 else None
-    refs = [u for u in (prev, s.get("still_url")) if u]
+    # The film's character sheets come first (as in the first render), so the new take keeps face, hair and outfit.
+    who = scene_cast(s, film_cast(out))
+    sheets = [u for c in who for u in c["urls"]][:MAX_IMAGE_REFS - 2]
+    refs = sheets + [u for u in (prev, s.get("still_url")) if u]
     ask = f"\nCHANGE IN THIS NEW TAKE (the user asked): {instruction.strip()}" if instruction.strip() else ""
-    prompt = (s.get("image_prompt") or s.get("action") or s.get("title") or "") + ask + (
+    prompt = (s.get("image_prompt") or s.get("action") or s.get("title") or "") + ask + _cast_note(who) + (
         "\nThe LAST reference image is this scene's previous version: same characters, set, light and style."
         if s.get("still_url") else "")
     kw = {"aspect_ratio": ar, "num_images": 1, **({"image_urls": refs} if refs else {})}
     await progress(f"Scene {n}: new first frame")
     still = _url(await _fal(fal_helper.generate_image, key, q["image_model"], prompt, **kw), "image")
+    if sheets:  # the same character check (and edit-fix) as the first render
+        p = out.get("plan") or {}
+        drift = await consistency_issues(sheets, still, p, note=s)
+        for _ in range(CAST_REDRAWS):
+            if not drift:
+                break
+            await progress(f"Scene {n}: character check - {drift[0][:80]}; fixing it")
+            fix = ("EDIT reference image 1 - this scene's frame. Keep its composition, camera, poses and action; change "
+                   "ONLY these differences so the characters match their references: " + "; ".join(drift) + "."
+                   + _cast_note(who, first=2))
+            try:
+                again = _url(await _fal(fal_helper.generate_image, key, q["image_model"], fix,
+                                        **{**kw, "image_urls": ([still] + sheets)[:MAX_IMAGE_REFS]}), "image")
+            except Exception as e:  # the earlier still is still usable
+                log.warning("scene %s character fix failed: %s", n, e)
+                break
+            drift2 = await consistency_issues(sheets, again, p, note=s)
+            if len(drift2) <= len(drift):
+                still, drift = again, drift2
+        if drift:
+            s["consistency_left"] = drift
     issues = await scene_issues(still, s, "first", prev)
     if issues:
         await progress(f"Scene {n}: {issues[0][:90]}; redrawing")
@@ -1581,9 +1913,9 @@ async def rerender_scene(out: dict, n: int, instruction: str, work: Path, progre
         if len(issues2) < len(issues):
             still, issues = still2, issues2
     span = b - a
-    models = [q["video_model"], *q.get("fallbacks", [])]
+    models = clip_models(q)
     motion = (f"{instruction.strip()}. " if instruction.strip() else "") + (s.get("motion_prompt") or s.get("action") or "")
-    clip_url, used, path, clip_issues_left = None, None, None, []
+    clip_url, used, path, clip_issues_left, errors = None, None, None, [], []
     for take in range(2):
         for m in models:
             lo, hi = CLIP_RANGE.get(m, (3, 15))
@@ -1591,18 +1923,35 @@ async def rerender_scene(out: dict, n: int, instruction: str, work: Path, progre
             await progress(f"Scene {n}: new clip ({dur} s, {m}){' - second take' if take else ''}")
             try:
                 fix = (f"One continuous shot, nothing morphs. AVOID: {'; '.join(clip_issues_left)}. " if take else "")
-                vid = await _fal(fal_helper.generate_video, key, m, (fix + motion)[:2400], duration=str(dur),
-                                 aspect_ratio=ar, resolution=q["resolution"] if m.startswith("seedance") else None,
-                                 audio=False, start_image=still)
+                base = dict(duration=str(dur), aspect_ratio=ar, resolution=clip_resolution(m, q), audio=False)
+                rrefs, rnote = clip_references(m, still, who)
+                els, enote = clip_elements(m, who)
+                vid = None
+                if rrefs or els:  # the characters ride along (Seedance references / Kling elements); plain if refused
+                    try:
+                        vid = (await _fal(fal_helper.generate_video, key, m, (rnote + " " + fix + motion)[:2400],
+                                          image_references=rrefs, **base) if rrefs else
+                               await _fal(fal_helper.generate_video, key, m, (enote + ". " + fix + motion)[:2400],
+                                          elements=els, start_image=still, multi_shot=False, **base))
+                    except Exception as e:
+                        if type(e).__name__ == "RunCancelled" or any(k in str(e).lower() for k in REFUSAL_MARKERS):
+                            raise
+                        log.warning("scene %s new take with characters failed on %s (%s); plain clip", n, m,
+                                    str(e)[:200])
+                if vid is None:
+                    vid = await _fal(fal_helper.generate_video, key, m, (fix + motion)[:2400], start_image=still,
+                                     multi_shot=not who, **base)
                 clip_url, used = _url(vid, "video"), m
                 break
-            except Exception as e:
-                if not any(k in str(e).lower() for k in REFUSAL_MARKERS):
+            except Exception as e:  # refused, unavailable or failed: the next model in the chain takes over
+                if type(e).__name__ == "RunCancelled":
                     raise
+                errors.append(f"{m}: {str(e)[:160]}")
+                log.warning("scene %s new take on %s failed (%s); trying the next clip model", n, m, str(e)[:200])
         if not clip_url:
-            raise EngineError(f"every clip model refused the new take of scene {n}")
+            raise EngineError(f"every clip model failed the new take of scene {n}: " + "; ".join(errors[-3:]))
         path = await _download(clip_url, work / f"scene_{n:02d}_new{take + 1}.mp4")
-        found = await clip_issues(path, s)
+        found = await clip_issues(path, s, cast=who)
         if not found or (take and len(found) >= len(clip_issues_left)):
             clip_issues_left = found if not take or len(found) < len(clip_issues_left) else clip_issues_left
             break
@@ -1646,25 +1995,41 @@ async def _none() -> None:
     return None
 
 
+_STOP_ALL = ("RunCancelled", "RunDeleted", "CancelledError")
+
+
 async def all_or_nothing(coros: list) -> list:
-    """Run the scenes in parallel; when one fails or the user cancels, the others stop too (no more paid calls)."""
+    """Run the scenes in parallel. When the user cancels (or deletes the run) the others stop at once. When one scene
+    fails on a model error, the others still finish: their fal jobs are already paid for and running, and what they
+    make is kept in the checkpoint, so a Retry only redoes the scene that failed. The first error is raised after."""
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    first: BaseException | None = None
     try:
-        async with asyncio.TaskGroup() as tg:
-            tasks = [tg.create_task(c) for c in coros]
-    except BaseExceptionGroup as eg:  # re-raise the first real error (RunCancelled / RunDeleted / provider error)
-        first = eg.exceptions[0]
-        while isinstance(first, BaseExceptionGroup):
-            first = first.exceptions[0]
-        raise first from None
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_EXCEPTION)
+            for t in done:
+                e = None if t.cancelled() else t.exception()
+                if e is None:
+                    continue
+                if type(e).__name__ in _STOP_ALL or not isinstance(e, Exception):
+                    raise e
+                first = first or e
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    if first:
+        raise first
     return [t.result() for t in tasks]
 
 
 async def _tts(text: str, key: str) -> str:
     """One narration line through fal's ElevenLabs TTS; returns the audio URL."""
     _count("voice", TTS_MODEL)
-    import fal_client
-    os.environ.setdefault("FAL_KEY", key)
-    res = await asyncio.to_thread(fal_client.subscribe, TTS_MODEL, arguments={"text": text, "voice": TTS_VOICE})
+    res = await asyncio.to_thread(fal_helper.client(key).subscribe, TTS_MODEL,
+                                  arguments={"text": text, "voice": TTS_VOICE}, client_timeout=fal_helper.FAL_TIMEOUT)
     url = ((res or {}).get("audio") or {}).get("url")
     if not url:
         raise EngineError(f"The voice model returned no audio: {json.dumps(res, default=str)[:300]}")
@@ -1867,24 +2232,71 @@ def clip_elements(model: str, members: list[dict] | None) -> tuple[list[dict], s
     return els, note
 
 
+REF_MODELS = set(fal_helper._VIDEO_REF2V_MODELS)
+
+
+def clip_references(model: str, still: str, members: list[dict] | None) -> tuple[list[str], str]:
+    """Seedance reference mode for a scene with drawn characters: the scene's still as @Image1 (the opening frame) and
+    each character's passport / front / back views after it, so the clip keeps their face, hair and outfit when they
+    move or turn. ([], "") for a model without reference mode or a scene without drawn characters."""
+    if model not in REF_MODELS or not still or not members:
+        return [], ""
+    urls, bits, k = [still], [], 2
+    for m in members:
+        views = [u for u in dict.fromkeys((m.get("passport"), m.get("front"), m.get("back"))) if u]
+        views = views[:fal_helper.REF2V_MAX_IMAGES - len(urls)]
+        if not views:
+            continue
+        name = m.get("name") or ("the person" if m.get("photo") else "the character")
+        bits.append(f"@Image{k}" + (f"-@Image{k + len(views) - 1}" if len(views) > 1 else "") + f" {'are' if len(views) > 1 else 'is'} {name}")
+        urls += views
+        k += len(views)
+        if len(urls) >= fal_helper.REF2V_MAX_IMAGES:
+            break
+    if not bits:
+        return [], ""
+    note = ("@Image1 is the opening frame of this shot: start exactly on it - same composition, camera, set, light and "
+            "people. Character references: " + "; ".join(bits) + " - the same face, hair (colour, length, style), "
+            "outfit, colours, footwear and accessories in every frame, from every angle; never a costume or hair change.")
+    return urls, note
+
+
 async def _clip(app, i, n, s, still, ar, q, key, progress, end: str | None = None, fix: str = "",
                 cast: list[dict] | None = None) -> tuple[str, str]:
     """Animate the still on the quality's clip model, then on its fallbacks if a model refuses the input. On Kling
     the scene's characters ride along as elements (their reference views)."""
-    models = [q["video_model"], *q.get("fallbacks", [])]
+    models = clip_models(q)
+    if cast and any(c.get("passport") or c.get("front") for c in cast):
+        # A scene with drawn characters: the models that take their reference sheets go first (Seedance reference
+        # mode, Kling 3 elements); a start frame alone lets the face change as soon as the person moves.
+        takes_refs = lambda m: m in REF_MODELS or (m.startswith("kling") and m != "kling_4_0")
+        models = sorted(models, key=lambda m: 0 if takes_refs(m) else 1)
     last = None
     for m in models:
         lo, hi = CLIP_RANGE.get(m, (3, 15))
         dur = max(lo, min(hi, int(s["duration"])))
-        note = "" if m == models[0] else f", retrying on {m} because {models[models.index(m) - 1]} refused it"
+        note = "" if m == models[0] else f", retrying on {m} because {models[models.index(m) - 1]} failed"
         await progress(f"{app['name']}: scene {i + 1}/{n} clip ({dur} s{', start and end frame' if end else ''}{note})")
         els, who = clip_elements(m, cast)
+        rrefs, rnote = clip_references(m, still, cast)
         try:
             s["motion_prompt"] = _motion(app["app_id"], s, {**q, "video_model": m}, fix)
             # A multi-shot clip draws every new shot from text alone: new angle, new face. One shot with characters.
             kw = dict(duration=str(dur), aspect_ratio=ar,
-                      resolution=q["resolution"] if m.startswith("seedance") else None,
+                      resolution=clip_resolution(m, q),
                       audio=q["audio"], start_image=still, multi_shot=not cast, **({"end_image": end} if end else {}))
+            if rrefs:  # Seedance reference mode: the still and the character sheets (no start/end frame fields)
+                try:
+                    rkw = {k: v for k, v in kw.items() if k not in ("start_image", "end_image", "multi_shot")}
+                    vid = await _fal(fal_helper.generate_video, key, m, f"{rnote} {s['motion_prompt']}",
+                                     image_references=rrefs, **rkw)
+                    s["clip_refs"] = len(rrefs)
+                    return _url(vid, "video"), m
+                except Exception as e:  # a consistency aid: an endpoint failure still gets the plain clip
+                    if type(e).__name__ == "RunCancelled" or any(k in str(e).lower() for k in REFUSAL_MARKERS):
+                        raise
+                    log.warning("scene %s clip with character references failed on %s (%s); retrying without them",
+                                i + 1, m, str(e)[:200])
             if els:
                 try:
                     vid = await _fal(fal_helper.generate_video, key, m, f"{who}. {s['motion_prompt']}",
@@ -1898,11 +2310,12 @@ async def _clip(app, i, n, s, still, ar, q, key, progress, end: str | None = Non
                                 i + 1, m, str(e)[:200])
             vid = await _fal(fal_helper.generate_video, key, m, s["motion_prompt"], **kw)
             return _url(vid, "video"), m
-        except Exception as e:
-            last = e
-            if not any(k in str(e).lower() for k in REFUSAL_MARKERS):
+        except Exception as e:  # refused, unavailable or failed: the next model in the chain takes over
+            if type(e).__name__ == "RunCancelled":
                 raise
-    raise EngineError(f"Every clip model refused scene {i + 1}: {str(last)[:300]}")
+            last = e
+            log.warning("scene %s clip on %s failed (%s); trying the next clip model", i + 1, m, str(e)[:200])
+    raise EngineError(f"Every clip model failed scene {i + 1}: {str(last)[:300]}")
 
 
 def _add_silence(ffmpeg: str, path: str) -> str:

@@ -88,18 +88,62 @@ def wanted(run: dict) -> bool:
     return bool(ASKS.search(run.get("prompt") or "")) and not wants_host(run.get("prompt") or "")
 
 
-def minutes_for(seconds) -> int | None:
-    """The playbook's length closest to a length in seconds (None when no length is set)."""
+def minutes_for(seconds) -> float | None:
+    """The length the user picked in the composer, exactly, in minutes (None when Auto / not set)."""
     try:
         s = float(seconds)
     except (TypeError, ValueError):
         return None
-    return min(LENGTHS, key=lambda m: abs(m * 60 - s)) if s > 0 else None
+    return round(s / 60, 3) if s > 0 else None
 
 
 def minutes_of(answer: str | None) -> int | None:
     m = re.match(r"\s*(\d+)", str(answer or ""))
     return int(m.group(1)) if m and int(m.group(1)) in LENGTHS else None
+
+
+_SAID_LEN = re.compile(r"\b(\d+(?:\.\d+)?)\s*-?\s*(minutes?|mins?|seconds?|secs?)\b", re.I)
+
+
+def minutes_in_prompt(prompt: str) -> float | None:
+    """A length the request states itself ("a 5-minute documentary", "90 seconds"), in minutes."""
+    m = _SAID_LEN.search(prompt or "")
+    if not m:
+        return None
+    n = float(m.group(1))
+    mins = n if m.group(2).lower().startswith("min") else n / 60
+    return round(mins, 3) if 0 < mins <= 60 else None
+
+
+def word_range(minutes: float) -> tuple[int, int]:
+    """Narration words for the length: the playbook's table, else about 140-170 words a minute."""
+    if minutes in LENGTHS:
+        return LENGTHS[int(minutes)]
+    return max(12, round(minutes * 140)), max(16, round(minutes * 170))
+
+
+def length_label(minutes: float) -> str:
+    """"1 Minute", "5 Minutes", "30 seconds", "90 seconds"."""
+    s = round(float(minutes) * 60)
+    if s % 60:
+        return f"{s} seconds"
+    return f"{s // 60} Minute{'s' if s > 60 else ''}"
+
+
+async def suggest_minutes(topic: str, prompt: str) -> int:
+    """Auto length: the AI picks the playbook length (1/5/8/12/20 min) that fits the topic; 1 when it cannot."""
+    try:
+        data = await _json([{"role": "system", "content":
+                             "You choose the length of a VOX-style documentary. Pick the shortest length that tells "
+                             "this topic well. Lengths in minutes: 1, 5, 8, 12, 20. Return ONLY JSON: "
+                             "{\"minutes\": <one of 1, 5, 8, 12, 20>}"},
+                            {"role": "user", "content": f"REQUEST: {prompt.strip()}\nTOPIC: {topic.strip()}"}],
+                           "engine.documentary.length", 400, "low")
+        m = int(data.get("minutes") or 0)
+    except (llm.LLMError, ValueError, TypeError) as e:
+        log.warning("auto length failed: %s", e)
+        return 1
+    return m if m in LENGTHS else min(LENGTHS, key=lambda k: abs(k - m)) if m > 0 else 1
 
 
 # ------------------------------------------------------------------------------------------------ the LLM
@@ -123,8 +167,8 @@ APP_SCRIPT = """
 
 ---
 ## THIS APP (how your steps run here - follow the master prompt above for everything else)
-The app asks the user itself: STEP 1 (topics) and STEP 2 (duration) are its own questions. You get the chosen TOPIC
-and DURATION below - write STEP 3 now. When the input has NO real topic (e.g. "make a documentary", "documentary
+The app handles STEP 1 (topics) and STEP 2 (duration) itself - never ask for a duration. You get the chosen TOPIC
+and DURATION below - write STEP 3 now, to exactly that duration. When the input has NO real topic (e.g. "make a documentary", "documentary
 ideas", "something about history"), do STEP 1 instead: return {"needs_topic": true, "topic_ideas": [50 titles]}.
 Write in the language of the user's request. Return ONLY JSON:
 {"needs_topic": false, "title": "...", "language": "en", "narrator_voice": "male|female", "hook": "...", "introduction": "...", "main_story": "...",
@@ -151,10 +195,10 @@ async def topic_ideas(prompt: str) -> list[str] | None:
     return ideas[:50] if data.get("needs_topic") and ideas else None
 
 
-async def write_script(topic: str, minutes: int) -> dict:
+async def write_script(topic: str, minutes: float) -> dict:
     """Prompt 1, step 3: the documentary script, its length matched to the chosen duration."""
-    lo, hi = LENGTHS[minutes]
-    user = (f"TOPIC: {topic.strip()}\nDURATION: {minutes} Minute{'s' if minutes > 1 else ''} ({lo}-{hi} words in all - "
+    lo, hi = word_range(minutes)
+    user = (f"TOPIC: {topic.strip()}\nDURATION: {length_label(minutes)} ({lo}-{hi} words in all - "
             "never mention it)")
     data = await _json([{"role": "system", "content": PROMPTS[1] + APP_SCRIPT}, {"role": "user", "content": user}],
                        "engine.documentary.script", 16000 if minutes >= 12 else 9000)
@@ -167,7 +211,7 @@ async def write_script(topic: str, minutes: int) -> dict:
         log.info("script is %s words for %s min (%s-%s): shortening", words, minutes, lo, hi)
         try:
             short = await _json([{"role": "system", "content": PROMPTS[1] + APP_SCRIPT + SHORTEN},
-                                 {"role": "user", "content": f"DURATION: {minutes} Minute{'s' if minutes > 1 else ''}"
+                                 {"role": "user", "content": f"DURATION: {length_label(minutes)}"
                                   f"\nTARGET: {lo}-{hi} words in all (now {words})\n\nSCRIPT JSON:\n"
                                   + json.dumps({k: data.get(k) for k in ("title", "language", "narrator_voice")
                                                 + SECTIONS}, ensure_ascii=False)}],
@@ -750,8 +794,8 @@ async def run(app: dict, handoff: dict, work: Path, progress) -> dict:
 
     script = req.get("script") or {}
     if not any(str(script.get(k) or "").strip() for k in SECTIONS):
-        minutes = int(req.get("minutes") or 1)
-        await progress(f"{name}: writing the {minutes}-minute script (Prompt 1)")
+        minutes = float(req.get("minutes") or 1)
+        await progress(f"{name}: writing the {length_label(minutes).lower()} script (Prompt 1)")
         script = await write_script(req.get("topic") or handoff.get("prompt") or "", minutes)
     sents = sentences(script_text(script))
     if not sents:
@@ -845,13 +889,13 @@ def build(run: dict) -> dict:
     app = registry.apps()[APP_ID]
     st = run.get("settings") or {}
     doc = run.get("documentary") or {}
-    script, minutes = doc.get("script") or {}, int(doc.get("minutes") or 1)
+    script, minutes = doc.get("script") or {}, float(doc.get("minutes") or 1)
     topic = doc.get("topic") or run.get("prompt") or ""
     ar = st.get("aspect_ratio") or "16:9"
     n = len(sentences(script_text(script))) if script else None
     caps = ["documentary.editorial_film"]
-    what = (f"“{script.get('title')}” - {minutes} min, {n} sentences = {n} illustrations" if script
-            else f"{minutes} min")
+    what = (f"“{script.get('title')}” - {length_label(minutes).lower()}, {n} sentences = {n} illustrations"
+            if script else length_label(minutes).lower())
     step = {"step_id": "s1", "app_id": APP_ID, "subtask_ids": ["t_doc"], "capabilities_used": caps,
             "responsibility": ("Opus writes the script (Prompt 1) and one VOX editorial image prompt per sentence "
                                "(Prompt 2); the image model paints them; the voice model narrates every sentence; "
@@ -868,7 +912,7 @@ def build(run: dict) -> dict:
         "production_type": ["documentary"],
         "assumptions": ["no video model: images + code animation", "one illustration per sentence (the playbook)"]
         + ([f"{n} images will be painted - a long documentary costs accordingly"] if n and n > 60 else []),
-        "scene": {"narrative": True}, "constraints": {"duration_s": minutes * 60, "aspect_ratio": ar},
+        "scene": {"narrative": True}, "constraints": {"duration_s": round(minutes * 60), "aspect_ratio": ar},
         "subtasks": [{"id": "t_doc", "group": "generate", "description": f"A VOX editorial documentary, {what}",
                       "required_capabilities": caps, "basis": "request"}],
         "direct": True, "confidence": 1.0}

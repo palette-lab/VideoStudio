@@ -12,8 +12,9 @@ The master prompt's stages map onto this app:
     Stage 3  palette lock           the playbook's 3 background options; the director picks one, the user can switch
     Stage 4  keyframe posters       one Nano Banana keyframe per sentence, with no text in it
     Stage 5  motion prompts         the 6-second timeline per scene + SFX
-    after    generation             the film engine: keyframe -> AI clip -> frame / clip AI checks -> joined film ->
-                                    narration voice-over (TTS) -> the words as an editable text layer
+    after    generation             the film engine: keyframe -> animated in code from an LLM motion plan, no
+                                    video model (engines/motion_code.py; MOTION_VIDEO_MODEL=on for AI clips) ->
+                                    joined film -> narration voice-over (TTS) -> the words as an editable text layer
 Each STOP of the master prompt is the app's approval step: the user reviews, switches the palette, edits or
 regenerates a scene, then approves the render.
 """
@@ -148,6 +149,8 @@ def messages(prompt: str, cls: dict, res: dict | None, files_note: str, apps: st
     if res:
         user.append("RESEARCH (the only facts you may state):\n" + json.dumps(
             {k: res.get(k) for k in ("summary", "angle", "facts", "timeline", "note")}, ensure_ascii=False)[:12000])
+    from .. import lang
+    system += lang.rule(cls.get("language") or "english")
     if keep_script:
         user.append(f"KEEP THIS APPROVED SCRIPT WORD FOR WORD (only the palette changes):\n{keep_script}")
     if keep_style:

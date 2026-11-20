@@ -226,7 +226,7 @@ async def _local_assets(run: dict) -> None:
 
 # ---------------------------------------------------------------- jobs
 
-@job("palette_video.analyze", timeout_seconds=1800, max_attempts=1)
+@job("palette_video.analyze", timeout_seconds=3600, max_attempts=1)  # story writing can take several long calls
 async def analyze_job(ctx: PluginContext, execution_: JobExecution, payload: dict):
     _configure(ctx)
     run = await _load(ctx, payload["run_id"])
@@ -262,11 +262,13 @@ async def analyze_job(ctx: PluginContext, execution_: JobExecution, payload: dic
         explainer = explainroo_engine.wanted(run)
         if explainer:  # documents -> Document Explainer: it reads and analyses them itself, no story or enhancer
             _event(run, f"Document Explainer: {len(explainroo_engine.documents_of(run))} document(s) to explain")
-        programmatic = not explainer and opuscar_engine.wanted(run)
+        from engines import as_written
+        written = not explainer and not run.get("parent_run") and bool(as_written.parse(run["prompt"]))
+        programmatic = not explainer and not written and opuscar_engine.wanted(run)
         if programmatic:  # a film drawn in code: it writes its own script and look, no story or enhancer
             style = opuscar_engine.named_style(run["prompt"])
             _event(run, "Programmatic Film" + (f": the {opuscar_engine.STYLES[style]['name']} look" if style else ""))
-        documentary = not explainer and not programmatic and vox_doc_engine.wanted(run)
+        documentary = not explainer and not programmatic and not written and vox_doc_engine.wanted(run)
         if documentary:  # the VOX documentary: it writes its own script from the playbook, no story or enhancer
             _event(run, "VOX Documentary (the Made by AI Playbook)")
         if run.get("parent_run") and not explainer and not programmatic and await _next_episode(ctx, run):
@@ -385,8 +387,8 @@ def _programmatic_result(run: dict) -> dict:
 
 
 async def _documentary_prepare(run: dict) -> dict | None:
-    """The Made by AI Playbook's first steps before the plan: a topic (50 ideas when there is none), a length (1, 5, 8,
-    12 or 20 minutes; the composer's length snaps to the closest), then Opus writes the script for the approval.
+    """The Made by AI Playbook's first steps before the plan: a topic (50 ideas when there is none), a length (the
+    composer's length exactly; on Auto the AI picks one), then Opus writes the script for the approval.
     Returns the question to ask, or None when the script is written."""
     doc = run.setdefault("documentary", {})
     answers = run.get("answers") or {}
@@ -401,22 +403,25 @@ async def _documentary_prepare(run: dict) -> dict | None:
                     "blocking": True, "affects": "content", "source": "ai"}
         topic = doc["ideas"][0] if doc["ideas"] else run["prompt"]
     doc["topic"] = topic
-    minutes = (vox_doc_engine.minutes_of(answers.get(vox_doc_engine.LENGTH_Q))
-               or vox_doc_engine.minutes_for((run.get("settings") or {}).get("duration_s"))
-               or (1 if run.get("proceed_with_defaults") else None))
+    # The length is never asked: the composer's length is used exactly; on Auto the request's own length
+    # ("a 5-minute documentary"), else the AI picks one that fits the topic.
+    minutes = (vox_doc_engine.minutes_for((run.get("settings") or {}).get("duration_s"))
+               or vox_doc_engine.minutes_of(answers.get(vox_doc_engine.LENGTH_Q))
+               or vox_doc_engine.minutes_in_prompt(run.get("prompt") or "")
+               or doc.get("auto_minutes"))
     if not minutes:
-        return {"id": "length", "question": vox_doc_engine.LENGTH_Q, "options": vox_doc_engine.LENGTH_OPTIONS,
-                "kind": "choice", "why": "The script is written to match the length (about 150 words a minute).",
-                "blocking": True, "affects": "content", "source": "ai"}
+        minutes = doc["auto_minutes"] = await vox_doc_engine.suggest_minutes(topic, run.get("prompt") or "")
+        _event(run, f"Documentary: Auto length - {vox_doc_engine.length_label(minutes).lower()}")
     doc["minutes"] = minutes
     if not doc.get("script") or doc.get("script_for") != [topic, minutes]:
-        _event(run, f"Documentary: Opus writes the {minutes}-minute script (Prompt 1)")
+        _event(run, f"Documentary: Opus writes the {vox_doc_engine.length_label(minutes).lower()} script (Prompt 1)")
         doc["script"] = await vox_doc_engine.write_script(topic, minutes)
         doc["script_for"] = [topic, minutes]
         n = len(vox_doc_engine.sentences(vox_doc_engine.script_text(doc["script"])))
         _event(run, f"Script ready: “{doc['script'].get('title') or topic}”, {n} sentences = {n} illustrations")
     run.update(enhanced_prompt=vox_doc_engine.script_text(doc["script"]), agent="documentary",
-               agent_label="VOX Documentary Director (Made by AI Playbook)", agent_why=f"{minutes} min: {topic}"[:200])
+               agent_label="VOX Documentary Director (Made by AI Playbook)",
+               agent_why=f"{vox_doc_engine.length_label(minutes)}: {topic}"[:200])
     return None
 
 
@@ -446,6 +451,19 @@ def _direct_result(run: dict) -> dict:
             "blocking_reasons": [] if ok else [i["message"] for i in validator.errors(issues)]}
 
 
+def _refresh_direct_plan(run: dict) -> None:
+    """After a story edit (scene edit, regenerate, palette or motion-engine switch), a plan that was built straight
+    from the story is rebuilt so its prompt, duration and scene count match what will be approved, and its revision
+    moves on (an approval of the old revision is then refused)."""
+    if not (run.get("plan") or {}).get("direct") or not story_direct.applies(run):
+        return
+    res = _direct_result(run)
+    run.update({k: res.get(k) for k in ("understanding", "plan", "issues", "blocking_reasons")})
+    if res["status"] == "awaiting_approval":
+        run["plan_revision"] += 1
+        run["execution"] = {s["step_id"]: {"status": "planned"} for s in res["plan"]["steps"]}
+
+
 @job("palette_video.execute", timeout_seconds=7200, max_attempts=1)
 async def execute_job(ctx: PluginContext, execution_: JobExecution, payload: dict):
     _configure(ctx)
@@ -469,6 +487,18 @@ async def execute_job(ctx: PluginContext, execution_: JobExecution, payload: dic
             if ex.get("status") in ("running", "queued", "planned"):
                 ex["status"] = "not_run"
         _event(run, "Cancelled")
+        run["report"] = execution.build_report(run)
+    except Exception as e:  # anything else: fail the run now instead of leaving it "executing" until the reaper
+        log.exception("run %s failed while executing", run["id"])
+        why = f"Execution stopped with an error ({type(e).__name__}: {str(e)[:200]})."
+        for ex in run.setdefault("execution", {}).values():
+            if ex.get("status") in ("running", "queued", "planned", None):
+                ex.update(status="failed", message=f"{why} Retry this step.")
+        if not any(ex.get("status") == "failed" for ex in run["execution"].values()):
+            for st in (run.get("plan") or {}).get("steps", []):
+                run["execution"].setdefault(st["step_id"], {"status": "failed", "message": f"{why} Retry this step."})
+        run["status"] = "failed"
+        _event(run, why)
         run["report"] = execution.build_report(run)
     llm.usage_log.reset(tokens[0])
     story_engine.fal_usage.reset(tokens[1])
@@ -885,6 +915,16 @@ async def _auto_enhance(ctx: PluginContext, run: dict) -> None:
     from engines import prompt_enhancer as pe
     if "enhanced_prompt" in run or run.get("parent_run"):  # once; follow-ups build on the chat's earlier request
         return
+    from engines import as_written
+    scenes = as_written.parse(run["prompt"])
+    if scenes:  # the user's own scenes: used word for word (no enhancer, no Story Intelligence, no rewrite)
+        st = run.get("settings") or {}
+        run["enhanced_prompt"] = None
+        run["enhance_note"] = (f"your {len(scenes)} scene{'s' if len(scenes) > 1 else ''} are used exactly as written"
+                               if len(scenes) > 1 else "used exactly as written")
+        run["story_intel"] = as_written.story_intel(scenes, st.get("duration_s"))
+        _event(run, f"Your {len(scenes)} scene{'s' if len(scenes) > 1 else ''}: used exactly as written, not enhanced")
+        return
     why = pe.should_auto_enhance(run["prompt"])
     if why:
         run["enhanced_prompt"] = None
@@ -905,7 +945,7 @@ async def _auto_enhance(ctx: PluginContext, run: dict) -> None:
         if out.get("vi"):
             run["video_intelligence"] = {k: v for k, v in out["vi"].items() if k != "prompt"}
         _event(run, f"Prompt enhanced by the {out['label']}")
-    except llm.LLMError as e:
+    except (llm.LLMError, ValueError) as e:
         run["enhanced_prompt"] = None
         run["enhance_note"] = f"not enhanced ({str(e)[:120]})"
 
@@ -950,9 +990,14 @@ async def _story_intelligence(ctx: PluginContext, run: dict) -> bool:
     from engines import prompt_enhancer as pe
     if intel.get("mode") == "motion_graphics":
         agent, label = "motion", "3D Motion Graphics Director"
-        if run["mode"] == "auto":  # full 3D = AI 3D clips from 3D keyframes: one app, not a graphics chain
+        from engines import story_engine
+        intel.setdefault("motion_engine", story_engine.default_motion_engine())  # the user can switch it in the plan
+        if run["mode"] == "auto":  # full 3D: one film engine (hosted by the Storyboard app), not a graphics chain
             run["mode"] = "storyboard"
-            _event(run, "Full 3D motion graphics: made by Storyboard & Video (3D keyframes -> AI clips, narration, music)")
+            _event(run, "Full 3D motion graphics: 3D keyframes -> "
+                        + ("Opus LLM animates each keyframe in code (no video model)"
+                           if intel["motion_engine"] == "opus_llm" else "AI video clips")
+                        + ", narration, SFX - switch the motion engine in the plan")
         if not st.get("aspect_ratio"):
             run.setdefault("settings", {})["aspect_ratio"] = intel.get("aspect_ratio") or "9:16"
     else:
@@ -1030,6 +1075,10 @@ class PalettePick(BaseModel):
     option: int
 
 
+class MotionEnginePick(BaseModel):
+    engine: str  # "opus_llm" (code animation, no video model) or "video_model"
+
+
 class SceneEdit(BaseModel):
     fields: dict = {}
 
@@ -1057,6 +1106,7 @@ async def edit_scene(run_id: str, n: int, body: SceneEdit, ctx: PluginContext = 
     except ValueError as e:
         raise HTTPException(400, str(e))
     run["enhanced_prompt"] = story_intel.as_brief(intel)
+    _refresh_direct_plan(run)
     _event(run, f"Scene {n} edited")
     await _save(ctx, run)
     return _public(run)
@@ -1197,7 +1247,25 @@ async def switch_palette(run_id: str, body: PalettePick, ctx: PluginContext = De
     except llm.LLMError as e:
         raise HTTPException(502, f"The palette could not be applied: {e}")
     run["enhanced_prompt"] = story_intel.as_brief(intel)
+    _refresh_direct_plan(run)
     _event(run, f"Palette {body.option} locked")
+    await _save(ctx, run)
+    return _public(run)
+
+
+@router.post("/runs/{run_id}/story/motion-engine", dependencies=WRITE)
+async def switch_motion_engine(run_id: str, body: MotionEnginePick, ctx: PluginContext = Depends(get_plugin_context)):
+    """3D motion graphics: animate the keyframes with the Opus LLM in code (no video model) or with an AI video model."""
+    from engines import story_engine
+    run = await _load(ctx, run_id)
+    intel = _story_or_409(run)
+    if intel.get("mode") != "motion_graphics":
+        raise HTTPException(400, "Only a 3D motion graphics plan has a motion engine.")
+    if body.engine not in story_engine.MOTION_ENGINES:
+        raise HTTPException(400, f"Unknown motion engine: {body.engine}")
+    intel["motion_engine"] = body.engine
+    _refresh_direct_plan(run)  # an already built plan names the new engine
+    _event(run, f"Motion engine: {story_engine.MOTION_ENGINES[body.engine]}")
     await _save(ctx, run)
     return _public(run)
 
@@ -1210,11 +1278,12 @@ async def regenerate_scene(run_id: str, n: int, body: SceneRegen, ctx: PluginCon
     _configure(ctx)
     try:
         await story_intel.regenerate_scene(intel, n, body.instruction)
+    except llm.LLMError as e:  # before ValueError: a malformed model reply is both
+        raise HTTPException(502, f"The scene could not be regenerated: {e}")
     except ValueError as e:
         raise HTTPException(400, str(e))
-    except llm.LLMError as e:
-        raise HTTPException(502, f"The scene could not be regenerated: {e}")
     run["enhanced_prompt"] = story_intel.as_brief(intel)
+    _refresh_direct_plan(run)
     _event(run, f"Scene {n} regenerated" + (f": {body.instruction[:80]}" if body.instruction else ""))
     await _save(ctx, run)
     return _public(run)
@@ -1437,6 +1506,7 @@ async def approve(run_id: str, body: Approval, ctx: PluginContext = Depends(get_
     run["status"] = "approved"  # set before enqueueing so a second approval is rejected
     for e in run["execution"].values():
         e["status"] = "queued"
+    run.pop("retry_steps", None)  # a new approval starts every step from the beginning
     _event(run, f"Plan revision {run['plan_revision']} approved")
     run.pop("job", None)  # the previous job is over; the new one records itself when it starts
     await _save(ctx, run)
@@ -1468,6 +1538,10 @@ async def recover(run_id: str, body: Recovery, ctx: PluginContext = Depends(get_
                                                        "classification": opt["classification"],
                                                        "changes": opt.get("changes", []), "at": time.time()})
         _event(run, f"Step {body.step_id} switched to {registry.apps()[body.app_id]['name']}")
+    else:  # a plain Retry of the same app: it continues where it failed (what the failed attempt made is reused)
+        run.setdefault("retry_steps", [])
+        if body.step_id not in run["retry_steps"]:
+            run["retry_steps"].append(body.step_id)
     for e in run["execution"].values():
         if e["status"] in ("failed", "not_run"):
             e["status"] = "queued"

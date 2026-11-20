@@ -25,6 +25,7 @@ import time
 
 from router_core import config, llm
 
+from .. import lang as lang_
 from . import agents, documentary, drama, motion, research as research_, validate as validate_
 
 log = logging.getLogger("palette_video.story_intel")
@@ -57,6 +58,7 @@ async def classify(prompt: str, files: list[dict], duration_s=None, aspect_ratio
         out["category"] = "other"
     if duration_s:  # the user's length wins
         out["duration_s"] = int(duration_s)
+    out["language"] = lang_.detect(prompt, out.get("language"))  # the user's language, never a mix
     try:
         out["duration_s"] = max(10, min(120, int(out.get("duration_s") or 45)))
     except (TypeError, ValueError):
@@ -93,6 +95,7 @@ def _architect_user(prompt: str, cls: dict, res: dict | None, files: list[dict],
              f"LENGTH: {cls['duration_s']} seconds. FORMAT: {aspect_ratio or 'not set'}.",
              f"UPLOADED FILES: {_files_note(files)} (uploaded people and products are the real ones: keep their exact "
              "look; refer to them as 'the person / product from the uploaded photo')."]
+    parts.append(lang_.rule(cls.get("language") or "english").strip())
     if res:
         parts.append("RESEARCH (the only facts you may state; cite them in fact_notes):\n"
                      + json.dumps({k: res.get(k) for k in ("summary", "angle", "timeline", "facts", "conflicts", "note")},
@@ -145,7 +148,7 @@ async def architect(prompt: str, cls: dict, res: dict | None, files: list[dict],
         msgs += _fix_msgs(feedback, previous)
     stage = ("story.documentary" if doc else "story.drama" if is_drama else "story.architect") \
         + (".revise" if revising else "")
-    plan = await _json(msgs, stage, 16000 if revising else 32000)
+    plan = await _json(msgs, stage, 32000)  # a revise rewrites much of the plan: same room as the first draft
     if revising:
         plan = merge_patch(previous, plan)
     scenes = [s for s in plan.get("scenes") or [] if isinstance(s, dict)]
@@ -453,7 +456,10 @@ async def regenerate_scene(intel: dict, n: int, instruction: str = "") -> dict:
                       "story.scene_regenerate", 8000)
     if not isinstance(new, dict) or not new.get("what_happens"):
         raise llm.LLMError("the scene came back empty")
-    new["n"] = n
+    # Merged over the old scene: the regen schema is the generic one, so fields it does not know (motion_gfx with the
+    # keyframe prompt, documentary hero/hit_word/host/items) are kept rather than dropped.
+    new = {**scenes[n - 1], **new, "n": n}
+    new.pop("edited", None)
     scenes[n - 1] = new
     _relint(intel)
     return new

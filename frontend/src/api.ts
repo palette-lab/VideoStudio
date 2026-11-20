@@ -69,6 +69,7 @@ export const api = {
   /** Story Intelligence: change one scene before approval (the rest of the story stays). */
   editScene: (id: string, n: number, fields: Record<string, unknown>) => post(`/runs/${id}/story/scenes/${n}`, { fields }),
   switchPalette: (id: string, option: number) => post(`/runs/${id}/story/palette`, { option }),
+  switchMotionEngine: (id: string, engine: string) => post(`/runs/${id}/story/motion-engine`, { engine }),
   /** Stop a run that is analysing or rendering (what was made so far is kept). */
   cancel: (id: string) => post(`/runs/${id}/cancel`),
   /** A new take of one scene of a finished film, spliced in; the rest of the film stays. */

@@ -82,11 +82,11 @@ KOKORO_POOL = {
             "male": ["zm_yunxi", "zm_yunjian", "zm_yunxia", "zm_yunyang"]},
 }
 WORDS_PER_S = 2.5
-QUALITY = {  # base clip models: Kling first (720p+ for the lip-sync), Seedance at 720p as the fallback
+QUALITY = {  # base clip models: Kling 4.0 first (720p+ for the lip-sync), then Seedance 2.0, then Kling 3.0
     "test": {"resolution": "720p", "max_total": 15, "default_total": 12,
-             "base_models": ["kling_3_0_standard", "seedance_2_0"]},
+             "base_models": ["kling_4_0", "seedance_2_0", "kling_3_0_standard"]},
     "full": {"resolution": "1080p", "max_total": 180, "default_total": 0,  # 0: the format's own default
-             "base_models": ["kling_3_0_pro", "kling_3_0_standard"]},
+             "base_models": ["kling_4_0", "seedance_2_0", "kling_3_0_pro"]},
 }
 FORMATS = {
     "youtube_explainer": {
@@ -180,9 +180,8 @@ def quality() -> dict:
 
 
 async def _subscribe(endpoint: str, args: dict, key: str) -> dict:
-    import fal_client
-    os.environ.setdefault("FAL_KEY", key)
-    return await asyncio.to_thread(fal_client.subscribe, endpoint, arguments=args)
+    return await asyncio.to_thread(fal_helper.client(key).subscribe, endpoint, arguments=args,
+                                   client_timeout=fal_helper.FAL_TIMEOUT)
 
 
 def _why(e: Exception) -> str:
@@ -406,7 +405,7 @@ async def base_clip(app: dict, image_url: str, prompt: str, ar: str, q: dict, ke
             await progress(f"{app['name']}: filming the presenter ({BASE_CLIP_S} s base clip, {m})")
             vid = await story_engine._fal(fal_helper.generate_video, key, m, prompt, duration=str(BASE_CLIP_S),
                                           aspect_ratio=ar, start_image=image_url, audio=False,
-                                          resolution=q["resolution"] if m.startswith("seedance") else None)
+                                          resolution=story_engine.clip_resolution(m, q))
             return await story_engine._download(story_engine._url(vid, "video"), work / "presenter_base.mp4")
         except Exception as e:  # refused or unavailable: the next model takes over
             errors.append(f"{m}: {_why(e)}")

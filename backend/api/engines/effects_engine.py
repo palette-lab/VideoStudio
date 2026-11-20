@@ -271,13 +271,14 @@ async def has_face(video: str, dur: float) -> bool:
         return False
 
 
-async def transcript(video: str, work: Path) -> list[dict]:
+async def transcript(video: str, work: Path, language: str | None = None) -> list[dict]:
     wav = work / "speech.wav"
     code, _ = await _run(["ffmpeg", "-v", "error", "-y", "-i", video, "-t", "600", "-ac", "1", "-ar", "16000", str(wav)], 120)
     if code != 0 or not wav.exists():
         return []  # no audio track
     try:
-        t = await llm.transcribe(wav)
+        from . import lang
+        t = await llm.transcribe(wav, lang.iso(language))
     except llm.LLMError:
         return []
     return [{"start": round(g.get("start") or 0, 2), "end": round(g.get("end") or 0, 2), "text": (g.get("text") or "").strip()}
@@ -406,7 +407,7 @@ async def run(app: dict, handoff: dict, video: str, work: Path, progress) -> dic
     dur = await _duration(video)
     if dur < 2:
         raise EffectsError("The video is too short for effects.")
-    face, segs = await asyncio.gather(has_face(video, dur), transcript(video, work))
+    face, segs = await asyncio.gather(has_face(video, dur), transcript(video, work, handoff.get("language")))
     text_free = bool(handoff.get("text_free"))  # the words go in the editable text layer, not the pixels
     want_captions = bool(segs) and handoff.get("captions", True) and not text_free
     cap = handoff.get("caption_style") or caption_style(bool(handoff.get("captions_only")))

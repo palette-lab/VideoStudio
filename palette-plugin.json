@@ -29,6 +29,7 @@
     "file_uploads": true,
     "external_network": [
       "llm.pltt.dev",
+      "router-api.pltt.ai",
       "queue.fal.run",
       "fal.run",
       "rest.alpha.fal.ai",

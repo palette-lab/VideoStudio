@@ -20,6 +20,15 @@ from .std_logs import call_sync, size
 
 logger = logging.getLogger("pltt_flow_video_2.fal")
 
+# Longest wait for one fal job (queue + generation), seconds. A hung subscribe no longer blocks its thread forever.
+FAL_TIMEOUT = float(os.getenv("FAL_TIMEOUT", "1800"))
+
+
+def client(api_key: Optional[str]) -> "fal_client.SyncClient":
+    """A fal client bound to this key. Scenes run in parallel threads, so the key is passed per client instead of
+    being swapped in the process-wide FAL_KEY (which raced: one call could restore or drop another call's key)."""
+    return fal_client.SyncClient(key=api_key or None)
+
 
 _VIDEO_MODELS: Dict[str, str] = {
     "kling_3_0_pro": "fal-ai/kling-video/v3/pro/text-to-video",
@@ -44,16 +53,20 @@ _VIDEO_I2V_MODELS: Dict[str, str] = {
     "ltx_video": "fal-ai/ltx-video/image-to-video",
 }
 
-# Reference-to-video endpoints (multiple reference images conditioning).
+# Reference-to-video endpoints (multiple reference images conditioning, up to REF2V_MAX_IMAGES, @Image1... in the
+# prompt; no start/end-frame fields). Seedance 2.0 uses its fast tier like the other modes (480p/720p); 1080p/4k
+# switch to the full endpoint below.
 _VIDEO_REF2V_MODELS: Dict[str, str] = {
-    "seedance_2_0": "bytedance/seedance-2.0/reference-to-video",
+    "seedance_2_0": "bytedance/seedance-2.0/fast/reference-to-video",
     "seedance_2_5": "bytedance/seedance-2.5/reference-to-video",
 }
+REF2V_MAX_IMAGES = 9
 
 # Seedance 2.0 Fast stops at 720p; 1080p and 4k need the full endpoints.
 _SEEDANCE_2_0_FULL: Dict[str, str] = {
     "bytedance/seedance-2.0/fast/text-to-video": "bytedance/seedance-2.0/text-to-video",
     "bytedance/seedance-2.0/fast/image-to-video": "bytedance/seedance-2.0/image-to-video",
+    "bytedance/seedance-2.0/fast/reference-to-video": "bytedance/seedance-2.0/reference-to-video",
 }
 
 _IMAGE_MODELS: Dict[str, str] = {
@@ -135,20 +148,12 @@ def _run_gen(
     logger.debug(f"📦 [Fal] Payload: {json.dumps(payload, default=str)}")
 
     # fal_client reads FAL_KEY from env; set it on this process for the call.
-    prev = os.environ.get("FAL_KEY")
-    os.environ["FAL_KEY"] = api_key
-    try:
-        with call_sync("fal", "subscribe", model=model_id) as _log:
-            _res = fal_client.subscribe(
-                model_id, arguments=payload, with_logs=True, on_queue_update=on_progress
-            )
-            _log.update(_fal_result_details(_res))
-        return _res
-    finally:
-        if prev is None:
-            os.environ.pop("FAL_KEY", None)
-        else:
-            os.environ["FAL_KEY"] = prev
+    with call_sync("fal", "subscribe", model=model_id) as _log:
+        _res = client(api_key).subscribe(
+            model_id, arguments=payload, with_logs=True, on_queue_update=on_progress, client_timeout=FAL_TIMEOUT
+        )
+        _log.update(_fal_result_details(_res))
+    return _res
 
 
 def video_request(
@@ -192,7 +197,7 @@ def video_request(
         # Seedance "reference images" mode → the reference-to-video endpoint,
         # conditioned on multiple reference images.
         model_id = _VIDEO_REF2V_MODELS[name]
-        kwargs["image_urls"] = list(image_references)
+        kwargs["image_urls"] = list(image_references)[:REF2V_MAX_IMAGES]
     elif start and name in _VIDEO_I2V_MODELS:
         model_id = _VIDEO_I2V_MODELS[name]
         # Provider-specific field names for the start/end frames:
@@ -281,18 +286,11 @@ def upscale_image(
         payload["target_resolution"] = target_resolution
 
     model_id = "fal-ai/seedvr/upscale/image"
-    prev = os.environ.get("FAL_KEY")
-    os.environ["FAL_KEY"] = api_key
-    try:
-        with call_sync("fal", "upscale", model=model_id, upscale_factor=upscale_factor) as _log:
-            _res = fal_client.subscribe(model_id, arguments=payload, with_logs=True, on_queue_update=on_progress)
-            _log.update(_fal_result_details(_res))
-        return _res
-    finally:
-        if prev is None:
-            os.environ.pop("FAL_KEY", None)
-        else:
-            os.environ["FAL_KEY"] = prev
+    with call_sync("fal", "upscale", model=model_id, upscale_factor=upscale_factor) as _log:
+        _res = client(api_key).subscribe(model_id, arguments=payload, with_logs=True, on_queue_update=on_progress,
+                                         client_timeout=FAL_TIMEOUT)
+        _log.update(_fal_result_details(_res))
+    return _res
 
 
 def image_model_id(name: str, **kwargs) -> str:
