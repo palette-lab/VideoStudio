@@ -23,9 +23,16 @@ DEFAULT_ORIGIN = "https://router-api.pltt.ai"
 # Nano Banana Pro first (fal, the router's keys), then Gemini direct, then Nano Banana 2.
 TEXT_MODELS = [m.strip() for m in os.getenv("ROUTER_IMAGE_MODELS", "image-production,image-staging,image-default")
                .split(",") if m.strip()]
+# Edits: Nano Banana Pro, Nano Banana 2, Gemini direct (no fal at all), then Runware's Nano Banana (another provider).
 EDIT_MODELS = [m.strip() for m in os.getenv("ROUTER_EDIT_MODELS",
-                                            "image-edit-production,image-edit-staging,image-edit-default")
+                                            "image-edit-production,image-edit-default,image-edit-staging,"
+                                            "palette-runware-fallback-image")
                .split(",") if m.strip()]
+# How each provider takes an inline (base64) picture - checked against the router 2026-11-20: the fal-backed models
+# reject the "base64" field but read a data: URL in "url"; Gemini direct is the other way round; Runware takes only
+# http(s) URLs (it is skipped for a call with an inline picture).
+BASE64_FIELD = {m.strip() for m in os.getenv("ROUTER_BASE64_MODELS", "image-edit-staging").split(",") if m.strip()}
+URL_ONLY = {m.strip() for m in os.getenv("ROUTER_URL_ONLY_MODELS", "palette-runware-fallback-image").split(",") if m.strip()}
 TIMEOUT_S = 300
 
 
@@ -63,12 +70,12 @@ def data_url(path: Path, max_side: int = 1536) -> str:
     return f"data:{mime};base64,{base64.b64encode(raw).decode()}"
 
 
-def _input(ref: str, i: int) -> dict:
+def _input(ref: str, i: int, model: str = "") -> dict:
     role = "style_reference" if i else "subject"
-    if ref.startswith("data:"):  # an inline picture: the router takes base64
+    if ref.startswith("data:") and model in BASE64_FIELD:  # an inline picture, in the form this provider reads
         head, _, b64 = ref.partition(",")
         return {"type": "image", "base64": b64, "mime_type": head[5:].split(";")[0] or "image/png", "role": role}
-    return {"type": "image", "url": ref, "role": role}
+    return {"type": "image", "url": ref, "role": role}  # an http(s) URL, or a data: URL for the fal-backed models
 
 
 def _body(prompt: str, model: str, aspect: str, refs: list[str]) -> dict:
@@ -77,7 +84,7 @@ def _body(prompt: str, model: str, aspect: str, refs: list[str]) -> dict:
     if aspect and ":" in aspect:
         body["aspect_ratio"] = aspect
     if refs:
-        body["inputs"] = [_input(u, i) for i, u in enumerate(refs)]
+        body["inputs"] = [_input(u, i, model) for i, u in enumerate(refs)]
     return body
 
 
@@ -129,6 +136,9 @@ async def generate(prompt: str, aspect: str = "16:9", refs: list[str] | None = N
     problems = []
     async with httpx.AsyncClient(timeout=httpx.Timeout(TIMEOUT_S, connect=20)) as client:
         for model in models:
+            if model in URL_ONLY and any(u.startswith("data:") for u in refs):
+                problems.append(f"{model}: skipped (it takes only http(s) picture URLs)")
+                continue
             try:
                 url = await _one(client, path, _body(prompt, model, aspect, refs))
                 if dest is not None:  # a picture that cannot be fetched counts as this model failing: try the next

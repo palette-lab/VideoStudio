@@ -58,11 +58,14 @@ def test_no_key_no_router(monkeypatch):
     assert not ri.available()
 
 
-def test_inline_pictures_go_as_base64_and_the_ratio_is_top_level():
+def test_inline_pictures_take_each_providers_form_and_the_ratio_is_top_level():
+    # The fal-backed models reject the base64 field but read a data: URL; Gemini direct takes base64 (router, 2026-11-20).
     body = ri._body("p", "image-edit-production", "9:16", ["data:image/jpeg;base64,QUJD", "https://x/r.png"])
     assert body["aspect_ratio"] == "9:16" and body["num_images"] == 1
-    assert body["inputs"][0] == {"type": "image", "base64": "QUJD", "mime_type": "image/jpeg", "role": "subject"}
+    assert body["inputs"][0] == {"type": "image", "url": "data:image/jpeg;base64,QUJD", "role": "subject"}
     assert body["inputs"][1]["url"] == "https://x/r.png"
+    g = ri._body("p", "image-edit-staging", "9:16", ["data:image/jpeg;base64,QUJD"])
+    assert g["inputs"][0] == {"type": "image", "base64": "QUJD", "mime_type": "image/jpeg", "role": "subject"}
 
 
 def test_fal_image_failures_fall_back_to_the_router(monkeypatch):
